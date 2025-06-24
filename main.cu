@@ -9,7 +9,11 @@ using std::chrono::duration_cast;
 using std::chrono::duration;
 using std::chrono::milliseconds;
 
-
+struct CSRMatrix {
+    int *hdr;
+    int *idx;
+    float *data;
+};
 
 //generate random data for the matrix
 void generateMatrix(float *M){
@@ -18,6 +22,14 @@ void generateMatrix(float *M){
     }
 }
 
+// generate a random sparce matrix with the specified sparcity percentage
+void generateSparceMatrix(float *M, int sparcityPctg) {
+    for (int i = 0; i < N*N; i++) {
+        if ((rand() % 100) > sparcityPctg) {
+            M[i] = rand() % 100;
+        }
+    }
+}
 
 //this function runs at GPU and it multiply 2 matrixes.
 __global__ void matrixMul(float* d_A,float* d_B,float* d_C , int n){
@@ -31,6 +43,7 @@ __global__ void matrixMul(float* d_A,float* d_B,float* d_C , int n){
     }
 }
 
+// sparce matrix multiplication
 
 
 int main() {
@@ -93,3 +106,5 @@ int main() {
 
     return 0;
 }
+
+// vim: ts=4 sw=4
