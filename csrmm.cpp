@@ -5,7 +5,7 @@
 #include <iostream>
 
 // Matrix size (N*N)
-#define N 10
+#define N 3
 
 struct CSRMatrix
 {
@@ -71,9 +71,31 @@ struct CSRMatrix
 void generate_sparce_matrix(float *M, int sparcity_pctg) {
         for (int i = 0; i < N*N; i++) {
                 if ((rand() % 100) > sparcity_pctg) {
-                M[i] = rand() % 100;
+                        M[i] = rand() % 100;
                 }
         }
+}
+
+/**
+ * Multiply a CSR matrix x a dense matrix
+ */
+float *mult(const CSRMatrix *A, const float *B)
+{
+        float *C = new float[N*N];
+        std::fill(C, C+N*N, 0.0);
+        int j = 0;
+        for (int i = 0; i < N; i++)
+        {
+                for (; j < A->hdr[i+1]; j++)
+                {
+                        for (int k = 0; k < N; k++)
+                        {
+                                C[i*N + k] += A->data[j] * B[A->idx[j]*N + k];
+                        }
+                        
+                }
+        }
+        return C;
 }
 
 int main(void)
@@ -93,7 +115,7 @@ int main(void)
 
         std::cout << "\n=== MATRIX B ===\n\n";
         float *M2 = new float[N*N];
-        generate_sparce_matrix(M2, 80);
+        generate_sparce_matrix(M2, 0);
 
         for (int i = 0; i < N*N; i++)
         {
@@ -103,6 +125,14 @@ int main(void)
 
         CSRMatrix *B = new CSRMatrix(M2);
         B->print();
+        
+        std::cout << "\n=== MATRIX C=AB ===\n";
+        float *C = mult(A, M2);
+        for (int i = 0; i < N*N; i++)
+        {
+                std::cout << C[i] << ' ';
+                if ((i+1) % N == 0) std::cout << '\n';
+        }
 
         return 0;
 }
