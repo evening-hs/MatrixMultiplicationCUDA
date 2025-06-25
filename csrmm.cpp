@@ -15,31 +15,31 @@ struct CSRMatrix
 
         CSRMatrix(float *M)
         {
-                hdr = new int[N+1];
+                hdr = new int[N + 1];
                 hdr[0] = 0;
 
                 for (int i = 0; i < N; i++)
                 {
-                        hdr[i+1] = hdr[i];
+                        hdr[i + 1] = hdr[i];
                         for (int j = 0; j < N; j++)
                         {
-                                if (M[i*N+j])
+                                if (M[i * N + j])
                                 {
-                                        hdr[i+1] ++;
+                                        hdr[i + 1]++;
                                 }
                         }
                 }
-                
+
                 idx = new int[hdr[N]];
                 data = new float[hdr[N]];
-                
-                for (int i = 0, j = 0; i < N*N; i++)
+
+                for (int i = 0, j = 0; i < N * N; i++)
                 {
                         if (M[i])
                         {
                                 idx[j] = i % N;
                                 data[j] = M[i];
-                                j ++;
+                                j++;
                         }
                 }
         }
@@ -47,7 +47,7 @@ struct CSRMatrix
         void print()
         {
                 std::cout << "Header:\n";
-                for (int i = 0; i < N+1; i++)
+                for (int i = 0; i < N + 1; i++)
                 {
                         std::cout << hdr[i] << ' ';
                 }
@@ -68,9 +68,12 @@ struct CSRMatrix
 /**
  * generate a random sparce matrix with the specified sparcity percentage
  */
-void generate_sparce_matrix(float *M, int sparcity_pctg) {
-        for (int i = 0; i < N*N; i++) {
-                if ((rand() % 100) > sparcity_pctg) {
+void generate_sparce_matrix(float *M, int sparcity_pctg)
+{
+        for (int i = 0; i < N * N; i++)
+        {
+                if ((rand() % 100) > sparcity_pctg)
+                {
                         M[i] = rand() % 100;
                 }
         }
@@ -81,18 +84,17 @@ void generate_sparce_matrix(float *M, int sparcity_pctg) {
  */
 float *mult(const CSRMatrix *A, const float *B)
 {
-        float *C = new float[N*N];
-        std::fill(C, C+N*N, 0.0);
-        int j = 0;
-        for (int i = 0; i < N; i++)
+        float *C = new float[N * N];
+        std::fill(C, C + N * N, 0.0);
+        for (int i = 0; i < N; i++) // row
         {
-                for (; j < A->hdr[i+1]; j++)
+                for (int j = 0; j < N; j++) // each col in B
                 {
-                        for (int k = 0; k < N; k++)
+                        for (int k = A->hdr[i]; k < A->hdr[i + 1]; k++) // each col with non 0 in A
                         {
-                                C[i*N + k] += A->data[j] * B[A->idx[j]*N + k];
+                                // I don't like this
+                                C[i * N + j] += A->data[k] * B[A->idx[k] * N + j];
                         }
-                        
                 }
         }
         return C;
@@ -101,38 +103,43 @@ float *mult(const CSRMatrix *A, const float *B)
 int main(void)
 {
         std::cout << "\n=== MATRIX A ===\n\n";
-        float *M1 = new float[N*N];
+        float *M1 = new float[N * N];
         generate_sparce_matrix(M1, 80);
 
-        for (int i = 0; i < N*N; i++)
+        for (int i = 0; i < N * N; i++)
         {
                 std::cout << M1[i] << ' ';
-                if ((i+1) % N == 0) std::cout << '\n';
+                if ((i + 1) % N == 0)
+                        std::cout << '\n';
         }
 
         CSRMatrix *A = new CSRMatrix(M1);
         A->print();
 
         std::cout << "\n=== MATRIX B ===\n\n";
-        float *M2 = new float[N*N];
+        float *M2 = new float[N * N];
         generate_sparce_matrix(M2, 0);
 
-        for (int i = 0; i < N*N; i++)
+        for (int i = 0; i < N * N; i++)
         {
                 std::cout << M2[i] << ' ';
-                if ((i+1) % N == 0) std::cout << '\n';
+                if ((i + 1) % N == 0)
+                        std::cout << '\n';
         }
 
         CSRMatrix *B = new CSRMatrix(M2);
         B->print();
-        
+
         std::cout << "\n=== MATRIX C=AB ===\n";
         float *C = mult(A, M2);
-        for (int i = 0; i < N*N; i++)
+        for (int i = 0; i < N * N; i++)
         {
                 std::cout << C[i] << ' ';
-                if ((i+1) % N == 0) std::cout << '\n';
+                if ((i + 1) % N == 0)
+                        std::cout << '\n';
         }
 
         return 0;
 }
+
+// vim: ts=8 sw=8
