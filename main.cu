@@ -1,7 +1,7 @@
 #include <iostream>
 #include <chrono>
 
-int N = 10000;
+int N = 1024; // should be a multiple of 32
 
 using namespace std;
 using std::chrono::duration;
@@ -96,6 +96,32 @@ void generateSparceMatrix(float *M, int sparsity)
     }
 }
 
+// matrices are equal
+bool equalMatrix(const float *A, const float *B) {
+    for (int i = 0; i < N * N; i++)
+        if (A[i] != B[i])
+            return false;
+    return true;
+}
+
+/**
+ * Dense matrix multiplication in CPU
+ */
+float *mm(const float *A, const float *B, float *C)
+{
+    memset(C, 0, sizeof(float) * N * N);
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            for (int k = 0; k < N; k++)
+            {
+                C[i * N + j] += A[i * N + k] * B[k * N + j];
+            }
+        }
+    }
+    return C;
+}
 
 /**
  * Dense matrix multiplication in GPU
@@ -142,9 +168,11 @@ int main()
     float *h_A = nullptr;
     float *h_B = nullptr;
     float *h_C = nullptr;
+    float *h_Correct = nullptr;
     h_A = static_cast<float *>(malloc(bytes));
     h_B = static_cast<float *>(malloc(bytes));
     h_C = static_cast<float *>(malloc(bytes));
+    h_Correct = static_cast<float *>(malloc(bytes));
 
     memset(h_A, 0, bytes);
 
@@ -199,10 +227,19 @@ int main()
     auto ms_int = duration_cast<chrono::milliseconds>(t2 - t1);
     cout << "gpu : " << ms_int.count() << endl;
 
+    // Compare results
+    mm(h_A, h_B, h_Correct);
+    if (equalMatrix(h_C, h_Correct)) {
+        cout << "The result is correct." << endl;
+    } else {
+        cout << "The result is wrong." << endl;
+    }
+
     // free the allocated ram
     free(h_A);
     free(h_B);
     free(h_C);
+    free(h_Correct);
     cudaFree(d_hdr);
     cudaFree(d_idx);
     cudaFree(d_data);
