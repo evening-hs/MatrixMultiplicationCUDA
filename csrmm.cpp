@@ -82,7 +82,7 @@ void generate_sparce_matrix(float *M, int sparcity_pctg)
 /**
  * Multiply a CSR matrix x a dense matrix
  */
-float *mult(const CSRMatrix *A, const float *B)
+float *spmm(const CSRMatrix *A, const float *B)
 {
         float *C = new float[N * N];
         std::fill(C, C + N * N, 0.0);
@@ -94,6 +94,26 @@ float *mult(const CSRMatrix *A, const float *B)
                         {
                                 // I don't like this
                                 C[i * N + j] += A->data[k] * B[A->idx[k] * N + j];
+                        }
+                }
+        }
+        return C;
+}
+
+/**
+ * Dense matrix multiplication
+ */
+float *mm(const float *A, const float *B)
+{
+        float *C = new float[N * N];
+        std::fill(C, C + N * N, 0.0);
+        for (int i = 0; i < N; i++)
+        {
+                for (int j = 0; j < N; j++)
+                {
+                        for (int k = 0; k < N; k++)
+                        {
+                                C[i][j] += A[i][k] * B[k][j];
                         }
                 }
         }
@@ -131,7 +151,7 @@ int main(void)
         B->print();
 
         std::cout << "\n=== MATRIX C=AB ===\n";
-        float *C = mult(A, M2);
+        float *C = spmm(A, M2);
         for (int i = 0; i < N * N; i++)
         {
                 std::cout << C[i] << ' ';
