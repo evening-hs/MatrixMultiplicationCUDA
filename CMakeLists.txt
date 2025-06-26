@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 3.8 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
+# Set CUDA architectures
+set(CMAKE_CUDA_ARCHITECTURES 89)
+
 project(MatrixMultiplicationCUDA CUDA)
 
 # Set CUDA specific flags

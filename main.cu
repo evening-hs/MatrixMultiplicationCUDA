@@ -11,11 +11,11 @@ using std::chrono::milliseconds;
 
 struct CSRMatrix
 {
-    int *hdr = NULL;
-    int *idx = NULL;
-    float *data = NULL;
+    int *hdr = nullptr;
+    int *idx = nullptr;
+    float *data = nullptr;
 
-    CSRMatrix(float *M)
+    explicit CSRMatrix(float *M)
     {
         hdr = (int *)malloc((N + 1) * sizeof(int));
         hdr[0] = 0;
@@ -46,7 +46,7 @@ struct CSRMatrix
         }
     }
 
-    void print()
+    void print() const
     {
         std::cout << "Header:\n";
         for (int i = 0; i < N + 1; i++)
@@ -141,7 +141,7 @@ int main()
     h_C = (float *)malloc(bytes);
 
     // generate random matrix
-    generateSparceMatrix(h_A);
+    generateSparceMatrix(h_A, 80);
     generateMatrix(h_B);
 
     // parse matrix A to CSR format
@@ -164,9 +164,9 @@ int main()
     }
 
     // copy data from RAM to GPU RAM
-    cudaMemcpy(d_A->hdr, csrA.hdr, sizeof(int)*(N+1));
-    cudaMemcpy(d_A->idx, csrA.idx, sizeof(int)*(csrA.hdr[N]));
-    cudaMemcpy(d_A->data, csrA.data, sizeof(float)*(csrA.hdr[N]));
+    cudaMemcpy(d_A->hdr, csrA.hdr, sizeof(int)*(N+1), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A->idx, csrA.idx, sizeof(int)*csrA.hdr[N], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A->data, csrA.data, sizeof(float)*csrA.hdr[N], cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
 
     // define the grid size
@@ -179,7 +179,8 @@ int main()
 
     // run the code and calculate the execution time
     auto t1 = high_resolution_clock::now();
-    matrixMul<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
+    //matrixMul<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
+    sparceMatrixMult<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
 
     cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
 
