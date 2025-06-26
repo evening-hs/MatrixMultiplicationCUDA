@@ -113,7 +113,7 @@ float *mm(const float *A, const float *B)
                 {
                         for (int k = 0; k < N; k++)
                         {
-                                C[i][j] += A[i][k] * B[k][j];
+                                C[i * N + j] += A[i * N + k] * B[k * N + j];
                         }
                 }
         }
@@ -150,14 +150,33 @@ int main(void)
         CSRMatrix *B = new CSRMatrix(M2);
         B->print();
 
-        std::cout << "\n=== MATRIX C=AB ===\n";
-        float *C = spmm(A, M2);
+        std::cout << "\n=== MATRIX C=AB using SpMM ===\n";
+        float *C1 = spmm(A, M2);
         for (int i = 0; i < N * N; i++)
         {
-                std::cout << C[i] << ' ';
+                std::cout << C1[i] << ' ';
                 if ((i + 1) % N == 0)
                         std::cout << '\n';
         }
+
+        std::cout << "\n=== MATRIX C=AB using normal MM ===\n";
+        float *C2 = mm(M1, M2);
+        for (int i = 0; i < N * N; i++)
+        {
+                std::cout << C2[i] << ' ';
+                if ((i + 1) % N == 0)
+                        std::cout << '\n';
+        }
+
+        // Compare results
+        for (int i = 0; i < N * N; i++)
+        {
+                if (C1[i] != C2[i]) {
+                        std::cout << "THE RESULTS ARE NOT EQUAL\n";
+                        return 1;
+                }
+        }
+        std::cout << "Both results match\n";
 
         return 0;
 }
