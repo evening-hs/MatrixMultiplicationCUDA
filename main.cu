@@ -15,7 +15,7 @@ struct CSRMatrix
     int *idx = nullptr;
     float *data = nullptr;
 
-    explicit CSRMatrix(float *M)
+    explicit CSRMatrix(const float *M)
     {
         hdr = (int *)malloc((N + 1) * sizeof(int));
         hdr[0] = 0;
@@ -25,19 +25,19 @@ struct CSRMatrix
             hdr[i + 1] = hdr[i];
             for (int j = 0; j < N; j++)
             {
-                if (M[i * N + j])
+                if (M[i * N + j] != 0)
                 {
                     hdr[i + 1]++;
                 }
             }
         }
 
-        idx = (int *)malloc(hdr[N] * sizeof(int));
-        data = (float *)malloc(hdr[N] * sizeof(float));
+        idx = static_cast<int *>(malloc(hdr[N] * sizeof(int)));
+        data = static_cast<float *>(malloc(hdr[N] * sizeof(float)));
 
         for (int i = 0, j = 0; i < N * N; i++)
         {
-            if (M[i])
+            if (M[i] != 0)
             {
                 idx[j] = i % N;
                 data[j] = M[i];
@@ -79,24 +79,28 @@ void generateMatrix(float *M)
 {
     for (int i = 0; i < N * N; i++)
     {
-        M[i] = rand() % 100;
+        M[i] = static_cast<float>(random() % 100);
     }
 }
 
-// generate a random sparce matrix with the specified sparcity percentage
-void generateSparceMatrix(float *M, int sparcityPctg)
+// generate a random sparce matrix with the specified sparsity percentage
+void generateSparceMatrix(float *M, int sparsity)
 {
+    memset(M, 0.0f, N * N * sizeof(float));
     for (int i = 0; i < N * N; i++)
     {
-        if ((rand() % 100) > sparcityPctg)
+        if ((random() % 100) > sparsity)
         {
-            M[i] = rand() % 100;
+            M[i] = static_cast<float>(random() % 100);
         }
     }
 }
 
-// this function runs at GPU and it multiply 2 matrixes.
-__global__ void matrixMul(float *d_A, float *d_B, float *d_C, int n)
+
+/**
+ * Dense matrix multiplication in GPU
+ */
+__global__ void matrixMul(const float *d_A, const float *d_B, float *d_C, int n)
 {
 
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
@@ -105,6 +109,8 @@ __global__ void matrixMul(float *d_A, float *d_B, float *d_C, int n)
     for (int k = 0; k < n; k++)
     {
         // Accumulate results for a single element
+        // There's no need here to use reduction  or atomic add, because this
+        // thread is the only one accessing this location
         d_C[rowIdx * n + colIdx] += d_A[rowIdx * n + k] * d_B[k * n + colIdx];
     }
 }
@@ -113,17 +119,17 @@ __global__ void matrixMul(float *d_A, float *d_B, float *d_C, int n)
  * Multiply a CSR matrix x a dense matrix
  * C must be initialized and filled with 0s
  */
-__global__ void *sparceMatrixMult(const CSRMatrix *A, const float *B, float *C, int n)
+__global__ void sparceMatrixMult(const int *hdr, const int *idx,
+    const float *data, const float *B, float *C, const int n)
 {
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
-    for (int k = A->hdr[rowIdx]; k < A->hdr[rowIdx + 1]; k++) // each col with non 0 in A
+    for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) // each col with non 0 in A
     {
         // I don't like this
-        C[rowIdx * n + colIdx] += A->data[k] * B[A->idx[k] * n + colIdx];
+        C[rowIdx * n + colIdx] += data[k] * B[idx[k] * n + colIdx];
     }
-    return C;
 }
 
 // sparce matrix multiplication
@@ -133,12 +139,14 @@ int main()
     // size of the matrixes
     size_t bytes = N * N * sizeof(float);
     // allocate data for the hosr
-    float *h_A;
-    float *h_B;
-    float *h_C;
-    h_A = (float *)malloc(bytes);
-    h_B = (float *)malloc(bytes);
-    h_C = (float *)malloc(bytes);
+    float *h_A = nullptr;
+    float *h_B = nullptr;
+    float *h_C = nullptr;
+    h_A = static_cast<float *>(malloc(bytes));
+    h_B = static_cast<float *>(malloc(bytes));
+    h_C = static_cast<float *>(malloc(bytes));
+
+    memset(h_A, 0, bytes);
 
     // generate random matrix
     generateSparceMatrix(h_A, 80);
@@ -147,27 +155,24 @@ int main()
     // parse matrix A to CSR format
     CSRMatrix csrA = CSRMatrix(h_A);
 
-    // allocate data at GPU ram
-    float *d_B;
-    float *d_C;
-    CSRMatrix *d_A;
-    cudaMalloc((void **)&d_A, sizeof(CSRMatrix));
-    cudaMalloc((void **)&d_A->hdr, sizeof(int)*(N+1));
-    cudaMalloc((void **)&d_A->idx, sizeof(int)*(csrA.hdr[N]));
-    cudaMalloc((void **)&d_A->data, sizeof(float)*(csrA.hdr[N]));
-    cudaMalloc((void **)&d_B, bytes);
+    // Allocate GPY memory
+    int *d_hdr = nullptr, *d_idx = nullptr;
+    float *d_data = nullptr, *d_B = nullptr, *d_C = nullptr;
 
-    cudaError e = cudaMalloc((void **)&d_C, bytes);
-    if (e != cudaSuccess)
-    {
-        printf("%s \n", cudaGetErrorString(e));
-    }
+    cudaMalloc(reinterpret_cast<void **>(&d_hdr), (N + 1) * sizeof(int));
+    cudaMalloc(reinterpret_cast<void **>(&d_idx), csrA.hdr[N] * sizeof(int));
+    cudaMalloc(reinterpret_cast<void **>(&d_data), csrA.hdr[N] * sizeof(float));
+    cudaMalloc(reinterpret_cast<void **>(&d_B), bytes);
+    cudaMalloc(reinterpret_cast<void **>(&d_C), bytes);
 
-    // copy data from RAM to GPU RAM
-    cudaMemcpy(d_A->hdr, csrA.hdr, sizeof(int)*(N+1), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_A->idx, csrA.idx, sizeof(int)*csrA.hdr[N], cudaMemcpyHostToDevice);
-    cudaMemcpy(d_A->data, csrA.data, sizeof(float)*csrA.hdr[N], cudaMemcpyHostToDevice);
+    // copy data from host to device
+    cudaMemcpy(d_hdr, csrA.hdr, (N + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_idx, csrA.idx, csrA.hdr[N] * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_data, csrA.data, csrA.hdr[N] * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
+
+    // Set result matrix to 0
+    cudaMemset(d_C, 0, bytes);
 
     // define the grid size
     dim3 gridSize;
@@ -180,8 +185,12 @@ int main()
     // run the code and calculate the execution time
     auto t1 = high_resolution_clock::now();
     //matrixMul<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
-    sparceMatrixMult<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
+    sparceMatrixMult<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
 
+    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
+
+    // Wait for GPU to finish
+    cudaDeviceSynchronize();
     cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
 
     auto t2 = high_resolution_clock::now();
@@ -194,10 +203,9 @@ int main()
     free(h_A);
     free(h_B);
     free(h_C);
-    cudaFree(d_A->hdr);
-    cudaFree(d_A->idx);
-    cudaFree(d_A->data);
-    cudaFree(d_A);
+    cudaFree(d_hdr);
+    cudaFree(d_idx);
+    cudaFree(d_data);
     cudaFree(d_B);
     cudaFree(d_C);
 
