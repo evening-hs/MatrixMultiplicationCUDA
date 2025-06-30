@@ -8,8 +8,11 @@ project(MatrixMultiplicationCUDA CUDA)
 set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+#add_compile_definitions(CHECK_CORRECTNESS)
+
 # Add executable
-add_executable(matrix_multiplication main.cu)
+add_executable(matrix_multiplication main.cu
+        csrmm.cpp)
 
 # Set CUDA specific properties
 set_target_properties(matrix_multiplication PROPERTIES

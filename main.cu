@@ -1,7 +1,7 @@
 #include <iostream>
 #include <chrono>
 
-int N = 1024; // should be a multiple of 32
+int N = 0x5000; // should be a multiple of 32
 
 using namespace std;
 using std::chrono::duration;
@@ -9,6 +9,7 @@ using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
 using std::chrono::milliseconds;
 
+// CSR Matrix structure
 struct CSRMatrix
 {
     int *hdr = nullptr;
@@ -17,7 +18,7 @@ struct CSRMatrix
 
     explicit CSRMatrix(const float *M)
     {
-        hdr = (int *)malloc((N + 1) * sizeof(int));
+        hdr = static_cast<int *>(malloc((N + 1) * sizeof(int)));
         hdr[0] = 0;
 
         for (int i = 0; i < N; i++)
@@ -74,6 +75,8 @@ struct CSRMatrix
     }
 };
 
+// UTILITIES
+
 // generate random data for the matrix
 void generateMatrix(float *M)
 {
@@ -99,15 +102,18 @@ void generateSparceMatrix(float *M, int sparsity)
 // matrices are equal
 bool equalMatrix(const float *A, const float *B) {
     for (int i = 0; i < N * N; i++)
-        if (A[i] != B[i])
+        if (A[i] != B[i]) {
+            std::cout << "Value at i = " << i << " mismatch " <<
+                A[i] << "!=" << B[i] << '\n';
             return false;
+        }
     return true;
 }
 
 /**
  * Dense matrix multiplication in CPU
  */
-float *mm(const float *A, const float *B, float *C)
+float *matrixMulCPU(const float *A, const float *B, float *C)
 {
     memset(C, 0, sizeof(float) * N * N);
     for (int i = 0; i < N; i++)
@@ -123,15 +129,18 @@ float *mm(const float *A, const float *B, float *C)
     return C;
 }
 
+// MATRIX MULTIPLICATION ALGORITHMS
+
 /**
  * Dense matrix multiplication in GPU
  */
-__global__ void matrixMul(const float *d_A, const float *d_B, float *d_C, int n)
+__global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, int n)
 {
 
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
+    d_C[rowIdx * n + colIdx] = 0.0f;
     for (int k = 0; k < n; k++)
     {
         // Accumulate results for a single element
@@ -145,12 +154,12 @@ __global__ void matrixMul(const float *d_A, const float *d_B, float *d_C, int n)
  * Multiply a CSR matrix x a dense matrix
  * C must be initialized and filled with 0s
  */
-__global__ void sparceMatrixMult(const int *hdr, const int *idx,
+__global__ void sparceMatrixMult1(const int *hdr, const int *idx,
     const float *data, const float *B, float *C, const int n)
 {
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
-
+    C[rowIdx * n + colIdx] = 0.0f;
     for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) // each col with non 0 in A
     {
         // I don't like this
@@ -158,13 +167,36 @@ __global__ void sparceMatrixMult(const int *hdr, const int *idx,
     }
 }
 
+/**
+ * Multiply a CSR matrix x a dense matrix
+ * C must be initialized and filled with 0s
+ */
+__global__ void sparceMatrixMult2(const int *hdr, const int *idx,
+    const float *data, const float *B, float *C, const int n)
+{
+    // there are better ways of mapping this memory (I think)
+    int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
+    int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
+    int length = (hdr[n] / blockDim.x) + (hdr[n] % blockDim.x > 0);
+    int start = blockDim.x * length;
+    int end = min(start+length, hdr[n]);
+    int j = start + threadIdx.x;
+    if (j < end) {
+        C[rowIdx * n + colIdx] = 0.0f;
+        for (int i = 0; i < n; i++) {
+            C[rowIdx * n + colIdx] += data[j] * B[idx[j] * n + i];
+        }
+    }
+
+}
+
 // sparce matrix multiplication
 
 int main()
 {
-    // size of the matrixes
+    // size of the matrices
     size_t bytes = N * N * sizeof(float);
-    // allocate data for the hosr
+    // allocate data for the host
     float *h_A = nullptr;
     float *h_B = nullptr;
     float *h_C = nullptr;
@@ -185,11 +217,12 @@ int main()
 
     // Allocate GPY memory
     int *d_hdr = nullptr, *d_idx = nullptr;
-    float *d_data = nullptr, *d_B = nullptr, *d_C = nullptr;
+    float *d_data = nullptr, *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
 
     cudaMalloc(reinterpret_cast<void **>(&d_hdr), (N + 1) * sizeof(int));
     cudaMalloc(reinterpret_cast<void **>(&d_idx), csrA.hdr[N] * sizeof(int));
     cudaMalloc(reinterpret_cast<void **>(&d_data), csrA.hdr[N] * sizeof(float));
+    cudaMalloc(reinterpret_cast<void **>(&d_A), bytes);
     cudaMalloc(reinterpret_cast<void **>(&d_B), bytes);
     cudaMalloc(reinterpret_cast<void **>(&d_C), bytes);
 
@@ -197,6 +230,7 @@ int main()
     cudaMemcpy(d_hdr, csrA.hdr, (N + 1) * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_idx, csrA.idx, csrA.hdr[N] * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_data, csrA.data, csrA.hdr[N] * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
 
     // Set result matrix to 0
@@ -210,30 +244,74 @@ int main()
     gridSize.y = N / 32;
     blockSize.y = 32;
 
-    // run the code and calculate the execution time
-    auto t1 = high_resolution_clock::now();
-    //matrixMul<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
-    sparceMatrixMult<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
+    // clocks
+    chrono::time_point<chrono::system_clock, chrono::system_clock::duration> t1, t2;
+    duration<long, ratio<1, 1000>> ms;
 
-    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
+    // RUN TESTS
 
-    // Wait for GPU to finish
+#ifdef CHECK_CORRECTNESS
+    // Compare results
+    t1 = high_resolution_clock::now();
+    matrixMulCPU(h_A, h_B, h_Correct);
+    t2 = high_resolution_clock::now();
+    ms = duration_cast<chrono::milliseconds>(t2 - t1);
+    cout << "matrixMulCPU time (ms):\t" << ms.count() << endl;
+#endif
+
+    // ### denseMatrixMul algorithm ###
+
+    t1 = high_resolution_clock::now();
+    denseMatrixMul<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
     cudaDeviceSynchronize();
     cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
+    t2 = high_resolution_clock::now();
+    ms = duration_cast<milliseconds>(t2 - t1);
+    cout << "denseMatrixMul time (ms):\t" << ms.count() << endl;
 
-    auto t2 = high_resolution_clock::now();
-
-    // calculate duration time of the serial code.
-    auto ms_int = duration_cast<chrono::milliseconds>(t2 - t1);
-    cout << "gpu : " << ms_int.count() << endl;
-
-    // Compare results
-    mm(h_A, h_B, h_Correct);
+#ifdef CHECK_CORRECTNESS
     if (equalMatrix(h_C, h_Correct)) {
         cout << "The result is correct." << endl;
     } else {
         cout << "The result is wrong." << endl;
     }
+#endif
+
+    // ### sparceMatrixMult1 algorithm ###
+
+    t1 = high_resolution_clock::now();
+    sparceMatrixMult1<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
+    t2 = high_resolution_clock::now();
+    ms = duration_cast<chrono::milliseconds>(t2 - t1);
+    cout << "sparceMatrixMult1 time (ms):\t" << ms.count() << endl;
+
+#ifdef CHECK_CORRECTNESS
+    if (equalMatrix(h_C, h_Correct)) {
+        cout << "The result is correct." << endl;
+    } else {
+        cout << "The result is wrong." << endl;
+    }
+#endif
+
+    // ### sparceMatrixMult2 algorithm ###
+
+    t1 = high_resolution_clock::now();
+    sparceMatrixMult2<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
+    t2 = high_resolution_clock::now();
+    ms = duration_cast<chrono::milliseconds>(t2 - t1);
+    cout << "sparceMatrixMult2 time (ms):\t" << ms.count() << endl;
+
+#ifdef CHECK_CORRECTNESS
+    if (equalMatrix(h_C, h_Correct)) {
+        cout << "The result is correct." << endl;
+    } else {
+        cout << "The result is wrong." << endl;
+    }
+#endif
 
     // free the allocated ram
     free(h_A);

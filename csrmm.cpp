@@ -82,7 +82,7 @@ void generate_sparce_matrix(float *M, int sparcity_pctg)
 /**
  * Multiply a CSR matrix x a dense matrix
  */
-float *spmm(const CSRMatrix *A, const float *B)
+float *spmm1(const CSRMatrix *A, const float *B)
 {
         float *C = new float[N * N];
         std::fill(C, C + N * N, 0.0);
@@ -91,6 +91,28 @@ float *spmm(const CSRMatrix *A, const float *B)
                 for (int j = 0; j < N; j++) // each col in B
                 {
                         for (int k = A->hdr[i]; k < A->hdr[i + 1]; k++) // each col with non 0 in A
+                        {
+                                // I don't like this
+                                C[i * N + j] += A->data[k] * B[A->idx[k] * N + j];
+                        }
+                }
+        }
+        return C;
+}
+
+/**
+ * Multiply a CSR matrix x a dense matrix
+ */
+float *spmm2(const CSRMatrix *A, const float *B)
+{
+        float *C = new float[N * N];
+        std::fill(C, C + N * N, 0.0);
+        int k = 0;
+        for (int i = 0; i < N; i++) // row
+        {
+                for (; k < A->hdr[i + 1]; k++) // each col with non 0 in A
+                {
+                        for (int j = 0; j < N; j++) // each col in B
                         {
                                 // I don't like this
                                 C[i * N + j] += A->data[k] * B[A->idx[k] * N + j];
@@ -149,9 +171,8 @@ int main(void)
 
         CSRMatrix *B = new CSRMatrix(M2);
         B->print();
-
-        std::cout << "\n=== MATRIX C=AB using SpMM ===\n";
-        float *C1 = spmm(A, M2);
+        std::cout << "\n=== MATRIX C=AB using SpMM1 ===\n";
+        float *C1 = spmm1(A, M2);
         for (int i = 0; i < N * N; i++)
         {
                 std::cout << C1[i] << ' ';
@@ -159,8 +180,8 @@ int main(void)
                         std::cout << '\n';
         }
 
-        std::cout << "\n=== MATRIX C=AB using normal MM ===\n";
-        float *C2 = mm(M1, M2);
+        std::cout << "\n=== MATRIX C=AB using SpMM2 ===\n";
+        float *C2 = spmm2(A, M2);
         for (int i = 0; i < N * N; i++)
         {
                 std::cout << C2[i] << ' ';
@@ -168,10 +189,19 @@ int main(void)
                         std::cout << '\n';
         }
 
+        std::cout << "\n=== MATRIX C=AB using normal MM ===\n";
+        float *C3 = mm(M1, M2);
+        for (int i = 0; i < N * N; i++)
+        {
+                std::cout << C3[i] << ' ';
+                if ((i + 1) % N == 0)
+                        std::cout << '\n';
+        }
+
         // Compare results
         for (int i = 0; i < N * N; i++)
         {
-                if (C1[i] != C2[i]) {
+                if (C1[i] != C2[i] || C1[i] != C3[i]) {
                         std::cout << "THE RESULTS ARE NOT EQUAL\n";
                         return 1;
                 }
