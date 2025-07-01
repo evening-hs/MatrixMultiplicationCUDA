@@ -1,3 +1,4 @@
+#include <cassert>
 #include <iostream>
 #include <chrono>
 
@@ -182,6 +183,22 @@ __global__ void sparceMatrixMult2(const int *hdr, const int *idx,
     }
 }
 
+/**
+ * Multiply a CSR matrix x a dense matrix
+ * C must be initialized and filled with 0s
+ */
+__global__ void sparceMatrixMult3(const int *hdr, const int *idx,
+    const float *data, const float *B, float *C, const int n) {
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < hdr[n]) {
+        int row = 0;
+        while (row < n && i >= hdr[row + 1]) row ++;
+
+        for (int k = 0; k < n; k++) {
+            atomicAdd(&C[row * n + k], data[i] * B[idx[i] * n + k]);
+        }
+    }
+}
 // sparce matrix multiplication
 
 int main()
@@ -202,7 +219,7 @@ int main()
     memset(h_A, 0, bytes);
 
     // generate random matrix
-    generateSparceMatrix(h_A, 0.9999);
+    generateSparceMatrix(h_A, 0.80);
     generateMatrix(h_B);
 
     // parse matrix A to CSR format
@@ -294,7 +311,7 @@ int main()
 
     // ### sparceMatrixMult2 algorithm ###
     // define the grid size
-    gridSize.x = N / (32*32);
+    gridSize.x = N / 32;
     blockSize.x = 32;
     gridSize.y = 1;
     blockSize.y = 1;
@@ -308,6 +325,31 @@ int main()
     t2 = high_resolution_clock::now();
     ms = duration_cast<chrono::milliseconds>(t2 - t1);
     cout << "sparceMatrixMult2 time (ms):\t" << ms.count() << endl;
+
+#ifdef CHECK_CORRECTNESS
+    if (equalMatrix(h_C, h_Correct)) {
+        cout << "The result is correct." << endl;
+    } else {
+        cout << "The result is wrong." << endl;
+    }
+#endif
+
+    // ### sparceMatrixMult3 algorithm ###
+    // define the grid size
+    gridSize.x = (csrA.hdr[N]) / 32 + (csrA.hdr[N] % 32 > 0 ? 1 : 0);
+    blockSize.x = 32;
+    gridSize.y = 1;
+    blockSize.y = 1;
+    cudaMemset(d_C, 0, bytes);
+    memset(h_C, 0, bytes);
+
+    t1 = high_resolution_clock::now();
+    sparceMatrixMult3<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
+    t2 = high_resolution_clock::now();
+    ms = duration_cast<chrono::milliseconds>(t2 - t1);
+    cout << "sparceMatrixMult3 time (ms):\t" << ms.count() << endl;
 
 #ifdef CHECK_CORRECTNESS
     if (equalMatrix(h_C, h_Correct)) {
