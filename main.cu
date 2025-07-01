@@ -1,7 +1,7 @@
 #include <iostream>
 #include <chrono>
 
-int N = 0x500; // should be a multiple of 32
+int N = 0x4000; // should be a multiple of 32
 
 using namespace std;
 using std::chrono::duration;
@@ -87,12 +87,12 @@ void generateMatrix(float *M)
 }
 
 // generate a random sparce matrix with the specified sparsity percentage
-void generateSparceMatrix(float *M, int sparsity)
+void generateSparceMatrix(float *M, float sparsity)
 {
     memset(M, 0.0f, N * N * sizeof(float));
     for (int i = 0; i < N * N; i++)
     {
-        if ((random() % 100) > sparsity)
+        if (static_cast<float>(random()) / static_cast<float> (RAND_MAX) > sparsity)
         {
             M[i] = static_cast<float>(random() % 100);
         }
@@ -159,9 +159,8 @@ __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
-    for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) // each col with non 0 in A
+    for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++)
     {
-        // I don't like this
         C[rowIdx * n + colIdx] += data[k] * B[idx[k] * n + colIdx];
     }
 }
@@ -171,19 +170,17 @@ __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
  * C must be initialized and filled with 0s
  */
 __global__ void sparceMatrixMult2(const int *hdr, const int *idx,
-    const float *data, const float *B, float *C, const int n)
-{
+    const float *data, const float *B, float *C, const int n) {
     int k = blockDim.x * blockIdx.x + threadIdx.x;
     if (k < n) {
         int i = 0;
         for (int row = 0; row < n; row++) {
             for (; i < hdr[row + 1]; i++) {
-                int col = idx[i];
-                atomicAdd(&C[row * n + k], data[i] * B[col * n + k]);
+                atomicAdd(&C[row * n + k], data[i] * B[idx[i] * n + k]);
             }
         }
     }
-
+}
 
 // sparce matrix multiplication
 
@@ -205,7 +202,7 @@ int main()
     memset(h_A, 0, bytes);
 
     // generate random matrix
-    generateSparceMatrix(h_A, 80);
+    generateSparceMatrix(h_A, 0.9999);
     generateMatrix(h_B);
 
     // parse matrix A to CSR format
@@ -297,7 +294,7 @@ int main()
 
     // ### sparceMatrixMult2 algorithm ###
     // define the grid size
-    gridSize.x = N / 32;
+    gridSize.x = N / (32*32);
     blockSize.x = 32;
     gridSize.y = 1;
     blockSize.y = 1;
