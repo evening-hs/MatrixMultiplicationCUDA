@@ -1,7 +1,7 @@
 #include <iostream>
 #include <chrono>
 
-int N = 0x5000; // should be a multiple of 32
+int N = 0x500; // should be a multiple of 32
 
 using namespace std;
 using std::chrono::duration;
@@ -140,7 +140,6 @@ __global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, i
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
-    d_C[rowIdx * n + colIdx] = 0.0f;
     for (int k = 0; k < n; k++)
     {
         // Accumulate results for a single element
@@ -159,7 +158,7 @@ __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
 {
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
-    C[rowIdx * n + colIdx] = 0.0f;
+
     for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) // each col with non 0 in A
     {
         // I don't like this
@@ -174,26 +173,23 @@ __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
 __global__ void sparceMatrixMult2(const int *hdr, const int *idx,
     const float *data, const float *B, float *C, const int n)
 {
-    // there are better ways of mapping this memory (I think)
-    int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
-    int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
-    int length = (hdr[n] / blockDim.x) + (hdr[n] % blockDim.x > 0);
-    int start = blockDim.x * length;
-    int end = min(start+length, hdr[n]);
-    int j = start + threadIdx.x;
-    if (j < end) {
-        C[rowIdx * n + colIdx] = 0.0f;
-        for (int i = 0; i < n; i++) {
-            C[rowIdx * n + colIdx] += data[j] * B[idx[j] * n + i];
+    int k = blockDim.x * blockIdx.x + threadIdx.x;
+    if (k < n) {
+        int i = 0;
+        for (int row = 0; row < n; row++) {
+            for (; i < hdr[row + 1]; i++) {
+                int col = idx[i];
+                atomicAdd(&C[row * n + k], data[i] * B[col * n + k]);
+            }
         }
     }
 
-}
 
 // sparce matrix multiplication
 
 int main()
 {
+    srand(time(nullptr));
     // size of the matrices
     size_t bytes = N * N * sizeof(float);
     // allocate data for the host
@@ -261,6 +257,8 @@ int main()
 
     // ### denseMatrixMul algorithm ###
 
+    cudaMemset(d_C, 0, bytes);
+    memset(h_C, 0, bytes);
     t1 = high_resolution_clock::now();
     denseMatrixMul<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
     cudaDeviceSynchronize();
@@ -279,6 +277,8 @@ int main()
 
     // ### sparceMatrixMult1 algorithm ###
 
+    cudaMemset(d_C, 0, bytes);
+    memset(h_C, 0, bytes);
     t1 = high_resolution_clock::now();
     sparceMatrixMult1<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
     cudaDeviceSynchronize();
@@ -296,6 +296,13 @@ int main()
 #endif
 
     // ### sparceMatrixMult2 algorithm ###
+    // define the grid size
+    gridSize.x = N / 32;
+    blockSize.x = 32;
+    gridSize.y = 1;
+    blockSize.y = 1;
+    cudaMemset(d_C, 0, bytes);
+    memset(h_C, 0, bytes);
 
     t1 = high_resolution_clock::now();
     sparceMatrixMult2<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
