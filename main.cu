@@ -2,7 +2,8 @@
 #include <iostream>
 #include <chrono>
 
-int N = 0x4000; // should be a multiple of 32
+const int N = 0x1000;// should be a multiple of 32
+const int N_THREADS = 32;
 
 using namespace std;
 using std::chrono::duration;
@@ -134,6 +135,7 @@ float *matrixMulCPU(const float *A, const float *B, float *C)
 
 /**
  * Dense matrix multiplication in GPU
+ * // O(n) per thread
  */
 __global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, int n)
 {
@@ -141,18 +143,22 @@ __global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, i
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
-    for (int k = 0; k < n; k++)
-    {
-        // Accumulate results for a single element
-        // There's no need here to use reduction  or atomic add, because this
-        // thread is the only one accessing this location
-        d_C[rowIdx * n + colIdx] += d_A[rowIdx * n + k] * d_B[k * n + colIdx];
+    if (rowIdx < n && colIdx < n) {
+        for (int k = 0; k < n; k++)
+        {
+            // Accumulate results for a single element
+            // There's no need here to use reduction  or atomic add, because this
+            // thread is the only one accessing this location
+            d_C[rowIdx * n + colIdx] += d_A[rowIdx * n + k] * d_B[k * n + colIdx];
+        }
     }
 }
 
 /**
  * Multiply a CSR matrix x a dense matrix
  * C must be initialized and filled with 0s
+ *
+ * O(R) R = non zeroes in this row
  */
 __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
     const float *data, const float *B, float *C, const int n)
@@ -160,9 +166,10 @@ __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
-    for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++)
-    {
-        C[rowIdx * n + colIdx] += data[k] * B[idx[k] * n + colIdx];
+    if (rowIdx < n && colIdx < n) {
+        for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) {
+            C[rowIdx * n + colIdx] += data[k] * B[idx[k] * n + colIdx];
+        }
     }
 }
 
@@ -219,7 +226,7 @@ int main()
     memset(h_A, 0, bytes);
 
     // generate random matrix
-    generateSparceMatrix(h_A, 0.80);
+    generateSparceMatrix(h_A, 0.7);
     generateMatrix(h_B);
 
     // parse matrix A to CSR format
@@ -249,10 +256,12 @@ int main()
     // define the grid size
     dim3 gridSize;
     dim3 blockSize;
-    gridSize.x = N / 32;
-    blockSize.x = 32;
-    gridSize.y = N / 32;
-    blockSize.y = 32;
+    gridSize.x = N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0);
+    blockSize.x = N_THREADS;
+    gridSize.y = N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0);
+    blockSize.y = N_THREADS;
+
+    cout << gridSize.x << " " << gridSize.y << endl;
 
     // clocks
     chrono::time_point<chrono::system_clock, chrono::system_clock::duration> t1, t2;
@@ -311,8 +320,8 @@ int main()
 
     // ### sparceMatrixMult2 algorithm ###
     // define the grid size
-    gridSize.x = N / 32;
-    blockSize.x = 32;
+    gridSize.x = N / (N_THREADS * N_THREADS) + (N % (N_THREADS * N_THREADS) > 0 ? 1 : 0);
+    blockSize.x = (N_THREADS * N_THREADS);
     gridSize.y = 1;
     blockSize.y = 1;
     cudaMemset(d_C, 0, bytes);
@@ -336,8 +345,8 @@ int main()
 
     // ### sparceMatrixMult3 algorithm ###
     // define the grid size
-    gridSize.x = (csrA.hdr[N]) / 32 + (csrA.hdr[N] % 32 > 0 ? 1 : 0);
-    blockSize.x = 32;
+    gridSize.x = (csrA.hdr[N]) / (N_THREADS * N_THREADS) + (csrA.hdr[N] % (N_THREADS * N_THREADS) > 0 ? 1 : 0);
+    blockSize.x = (N_THREADS * N_THREADS);
     gridSize.y = 1;
     blockSize.y = 1;
     cudaMemset(d_C, 0, bytes);
