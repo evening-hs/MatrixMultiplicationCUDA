@@ -1,11 +1,14 @@
 #include <cassert>
 #include <iostream>
 #include <chrono>
+#include <mma.h>
 
-const int N = 0x1000;// should be a multiple of 32
+const int N = 16;// should be a multiple of 32
 const int N_THREADS = 32;
 
 using namespace std;
+using namespace nvcuda;
+
 using std::chrono::duration;
 using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
@@ -155,6 +158,28 @@ __global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, i
 }
 
 /**
+ * Multiply two dense matrices using tensors wmma
+ */
+
+__global__ void denseMatrixMulTensor(const half *d_A, const half *d_B,
+    float *d_C)
+{
+    wmma::fragment<wmma::matrix_a, N, N, N, half, wmma::col_major> a_frag;
+    wmma::fragment<wmma::matrix_b, N, N, N, half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, N, N, N, float> c_frag;
+
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    wmma::load_matrix_sync(a_frag, d_A, N);
+    wmma::load_matrix_sync(b_frag, d_B, N);
+
+    wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+
+    wmma::store_matrix_sync(d_C, c_frag, N, wmma::mem_row_major);
+}
+
+
+/**
  * Multiply a CSR matrix x a dense matrix
  * C must be initialized and filled with 0s
  *
@@ -206,7 +231,6 @@ __global__ void sparceMatrixMult3(const int *hdr, const int *idx,
         }
     }
 }
-// sparce matrix multiplication
 
 int main()
 {
@@ -226,7 +250,7 @@ int main()
     memset(h_A, 0, bytes);
 
     // generate random matrix
-    generateSparceMatrix(h_A, 0.7);
+    generateSparceMatrix(h_A, 0.0);
     generateMatrix(h_B);
 
     // parse matrix A to CSR format
@@ -234,13 +258,14 @@ int main()
 
     // Allocate GPY memory
     int *d_hdr = nullptr, *d_idx = nullptr;
-    float *d_data = nullptr, *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
+    half *d_data = nullptr, *d_A = nullptr, *d_B = nullptr;
+    float *d_C = nullptr;
 
     cudaMalloc(reinterpret_cast<void **>(&d_hdr), (N + 1) * sizeof(int));
     cudaMalloc(reinterpret_cast<void **>(&d_idx), csrA.hdr[N] * sizeof(int));
     cudaMalloc(reinterpret_cast<void **>(&d_data), csrA.hdr[N] * sizeof(float));
-    cudaMalloc(reinterpret_cast<void **>(&d_A), bytes);
-    cudaMalloc(reinterpret_cast<void **>(&d_B), bytes);
+    cudaMalloc(&d_A, N * N * sizeof(half));
+    cudaMalloc(&d_B, N * N * sizeof(half));
     cudaMalloc(reinterpret_cast<void **>(&d_C), bytes);
 
     // copy data from host to device
@@ -279,7 +304,7 @@ int main()
 #endif
 
     // ### denseMatrixMul algorithm ###
-
+    /*
     cudaMemset(d_C, 0, bytes);
     memset(h_C, 0, bytes);
     t1 = high_resolution_clock::now();
@@ -359,6 +384,34 @@ int main()
     t2 = high_resolution_clock::now();
     ms = duration_cast<chrono::milliseconds>(t2 - t1);
     cout << "sparceMatrixMult3 time (ms):\t" << ms.count() << endl;
+
+#ifdef CHECK_CORRECTNESS
+    if (equalMatrix(h_C, h_Correct)) {
+        cout << "The result is correct." << endl;
+    } else {
+        cout << "The result is wrong." << endl;
+    }
+#endif
+    */
+
+    gridSize = {32, 1, 1};
+    blockSize = {1, 1, 1};
+    cudaMemset(d_C, 0, bytes);
+    memset(h_C, 0, bytes);
+
+    for (int i = 0; i < N; i++) {
+
+    }
+
+    denseMatrixMulTensor<<<gridSize, blockSize>>>(d_A, d_B, d_C);
+    
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
+    t2 = high_resolution_clock::now();
+    ms = duration_cast<milliseconds>(t2 - t1);
+    cout << "denseMatrixMulTensor time (ms):\t" << ms.count() << endl;
+
+
 
 #ifdef CHECK_CORRECTNESS
     if (equalMatrix(h_C, h_Correct)) {
