@@ -53,3 +53,7 @@ CTestTestfile.cmake
 # Build directory
 build/
 cmake-build-*/
+
+# Output files
+*.txt*
+*.out*

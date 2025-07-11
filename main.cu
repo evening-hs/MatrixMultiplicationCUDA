@@ -2,8 +2,9 @@
 #include <iostream>
 #include <chrono>
 #include <mma.h>
+#include <vector>
 
-const int N = 16;// should be a multiple of 32
+const int N = 0x1000;// should be a multiple of 32
 const int N_THREADS = 32;
 
 using namespace std;
@@ -14,12 +15,29 @@ using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
 using std::chrono::milliseconds;
 
+#define BYTES_SIZE(T) (N * N * sizeof(T))
+#define MALLOC_MATRIX(T) static_cast<T *>(malloc(BYTES_SIZE(T)));
+#define PREPARE_FUNC(_name) cout << "Running " << _name << "\n"; \
+                            t1 = high_resolution_clock::now(); \
+                            memset(memC, 0, BYTES_SIZE(float)); \
+                            cudaMemset(gpuC, 0, BYTES_SIZE(float));
+#define END_FUNC(_name) cudaDeviceSynchronize(); \
+                        error = cudaGetLastError(); \
+                        if (error != cudaSuccess) \
+                            cout << "CUDA error: %s\n" << cudaGetErrorString(error); \
+                        cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
+                        t2 = high_resolution_clock::now(); \
+                        ms = duration_cast<milliseconds>(t2 - t1); \
+                        cout << _name << " time (ms):\t" << ms.count() << endl; \
+
 // CSR Matrix structure
 struct CSRMatrix
 {
     int *hdr = nullptr;
     int *idx = nullptr;
     float *data = nullptr;
+
+    explicit CSRMatrix() {}
 
     explicit CSRMatrix(const float *M)
     {
@@ -118,7 +136,7 @@ bool equalMatrix(const float *A, const float *B) {
 /**
  * Dense matrix multiplication in CPU
  */
-float *matrixMulCPU(const float *A, const float *B, float *C)
+float *matrixMulCPU(const half *A, const half *B, float *C)
 {
     memset(C, 0, sizeof(float) * N * N);
     for (int i = 0; i < N; i++)
@@ -127,7 +145,7 @@ float *matrixMulCPU(const float *A, const float *B, float *C)
         {
             for (int k = 0; k < N; k++)
             {
-                C[i * N + j] += A[i * N + k] * B[k * N + j];
+                C[i * N + j] += __half2float(A[i * N + k]) * __half2float(B[k * N + j]);
             }
         }
     }
@@ -161,21 +179,27 @@ __global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, i
  * Multiply two dense matrices using tensors wmma
  */
 
-__global__ void denseMatrixMulTensor(const half *d_A, const half *d_B,
-    float *d_C)
-{
-    wmma::fragment<wmma::matrix_a, N, N, N, half, wmma::col_major> a_frag;
-    wmma::fragment<wmma::matrix_b, N, N, N, half, wmma::row_major> b_frag;
-    wmma::fragment<wmma::accumulator, N, N, N, float> c_frag;
+__global__ void denseMatrixMulTensor(const half *d_A, const half *d_B, float *d_C) {
+    // Calculate which 16x16 tile this thread block handles
+    int warp_row = blockIdx.y * 16;
+    int warp_col = blockIdx.x * 16;
+
+    if (warp_row >= N || warp_col >= N) return;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
 
     wmma::fill_fragment(c_frag, 0.0f);
 
-    wmma::load_matrix_sync(a_frag, d_A, N);
-    wmma::load_matrix_sync(b_frag, d_B, N);
+    // Accumulate over K dimension in 16x16 chunks
+    for (int k = 0; k < N; k += 16) {
+        wmma::load_matrix_sync(a_frag, d_A + warp_row * N + k, N);
+        wmma::load_matrix_sync(b_frag, d_B + k * N + warp_col, N);
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+    }
 
-    wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-
-    wmma::store_matrix_sync(d_C, c_frag, N, wmma::mem_row_major);
+    wmma::store_matrix_sync(d_C + warp_row * N + warp_col, c_frag, N, wmma::mem_row_major);
 }
 
 
@@ -232,205 +256,74 @@ __global__ void sparceMatrixMult3(const int *hdr, const int *idx,
     }
 }
 
-int main()
-{
+int main() {
     srand(time(nullptr));
-    // size of the matrices
-    size_t bytes = N * N * sizeof(float);
-    // allocate data for the host
-    float *h_A = nullptr;
-    float *h_B = nullptr;
-    float *h_C = nullptr;
-    float *h_Correct = nullptr;
-    h_A = static_cast<float *>(malloc(bytes));
-    h_B = static_cast<float *>(malloc(bytes));
-    h_C = static_cast<float *>(malloc(bytes));
-    h_Correct = static_cast<float *>(malloc(bytes));
 
-    memset(h_A, 0, bytes);
-
-    // generate random matrix
-    generateSparceMatrix(h_A, 0.0);
-    generateMatrix(h_B);
-
-    // parse matrix A to CSR format
-    CSRMatrix csrA = CSRMatrix(h_A);
-
-    // Allocate GPY memory
-    int *d_hdr = nullptr, *d_idx = nullptr;
-    half *d_data = nullptr, *d_A = nullptr, *d_B = nullptr;
-    float *d_C = nullptr;
-
-    cudaMalloc(reinterpret_cast<void **>(&d_hdr), (N + 1) * sizeof(int));
-    cudaMalloc(reinterpret_cast<void **>(&d_idx), csrA.hdr[N] * sizeof(int));
-    cudaMalloc(reinterpret_cast<void **>(&d_data), csrA.hdr[N] * sizeof(float));
-    cudaMalloc(&d_A, N * N * sizeof(half));
-    cudaMalloc(&d_B, N * N * sizeof(half));
-    cudaMalloc(reinterpret_cast<void **>(&d_C), bytes);
-
-    // copy data from host to device
-    cudaMemcpy(d_hdr, csrA.hdr, (N + 1) * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_idx, csrA.idx, csrA.hdr[N] * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_data, csrA.data, csrA.hdr[N] * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice);
-
-    // Set result matrix to 0
-    cudaMemset(d_C, 0, bytes);
-
-    // define the grid size
-    dim3 gridSize;
-    dim3 blockSize;
-    gridSize.x = N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0);
-    blockSize.x = N_THREADS;
-    gridSize.y = N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0);
-    blockSize.y = N_THREADS;
-
-    cout << gridSize.x << " " << gridSize.y << endl;
-
-    // clocks
+    float *memA = MALLOC_MATRIX(float);
+    float *memB = MALLOC_MATRIX(float);
+    float *memC = MALLOC_MATRIX(float);
+    float *correctMatrix = MALLOC_MATRIX(float);
+    half *memA_half = MALLOC_MATRIX(half);
+    half *memB_half = MALLOC_MATRIX(half);
+    float *gpuC;
+    half *gpuA_half, *gpuB_half, *gpuCSRData;
+    int *gpuCSRHdr, *gpuCSRIdx;
     chrono::time_point<chrono::system_clock, chrono::system_clock::duration> t1, t2;
     duration<long, ratio<1, 1000>> ms;
+    dim3 gridSize, blockSize;
+    cudaError_t error;
 
-    // RUN TESTS
+    generateSparceMatrix(memA, 0.0);
+    generateMatrix(memB);
+    CSRMatrix *csrA = new CSRMatrix(memA);
 
-#ifdef CHECK_CORRECTNESS
-    // Compare results
-    t1 = high_resolution_clock::now();
-    matrixMulCPU(h_A, h_B, h_Correct);
-    t2 = high_resolution_clock::now();
-    ms = duration_cast<chrono::milliseconds>(t2 - t1);
-    cout << "matrixMulCPU time (ms):\t" << ms.count() << endl;
-#endif
-
-    // ### denseMatrixMul algorithm ###
-    /*
-    cudaMemset(d_C, 0, bytes);
-    memset(h_C, 0, bytes);
-    t1 = high_resolution_clock::now();
-    denseMatrixMul<<<gridSize, blockSize>>>(d_A, d_B, d_C, N);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
-    t2 = high_resolution_clock::now();
-    ms = duration_cast<milliseconds>(t2 - t1);
-    cout << "denseMatrixMul time (ms):\t" << ms.count() << endl;
-
-#ifdef CHECK_CORRECTNESS
-    if (equalMatrix(h_C, h_Correct)) {
-        cout << "The result is correct." << endl;
-    } else {
-        cout << "The result is wrong." << endl;
-    }
-#endif
-
-    // ### sparceMatrixMult1 algorithm ###
-
-    cudaMemset(d_C, 0, bytes);
-    memset(h_C, 0, bytes);
-    t1 = high_resolution_clock::now();
-    sparceMatrixMult1<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
-    t2 = high_resolution_clock::now();
-    ms = duration_cast<chrono::milliseconds>(t2 - t1);
-    cout << "sparceMatrixMult1 time (ms):\t" << ms.count() << endl;
-
-#ifdef CHECK_CORRECTNESS
-    if (equalMatrix(h_C, h_Correct)) {
-        cout << "The result is correct." << endl;
-    } else {
-        cout << "The result is wrong." << endl;
-    }
-#endif
-
-    // ### sparceMatrixMult2 algorithm ###
-    // define the grid size
-    gridSize.x = N / (N_THREADS * N_THREADS) + (N % (N_THREADS * N_THREADS) > 0 ? 1 : 0);
-    blockSize.x = (N_THREADS * N_THREADS);
-    gridSize.y = 1;
-    blockSize.y = 1;
-    cudaMemset(d_C, 0, bytes);
-    memset(h_C, 0, bytes);
-
-    t1 = high_resolution_clock::now();
-    sparceMatrixMult2<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
-    t2 = high_resolution_clock::now();
-    ms = duration_cast<chrono::milliseconds>(t2 - t1);
-    cout << "sparceMatrixMult2 time (ms):\t" << ms.count() << endl;
-
-#ifdef CHECK_CORRECTNESS
-    if (equalMatrix(h_C, h_Correct)) {
-        cout << "The result is correct." << endl;
-    } else {
-        cout << "The result is wrong." << endl;
-    }
-#endif
-
-    // ### sparceMatrixMult3 algorithm ###
-    // define the grid size
-    gridSize.x = (csrA.hdr[N]) / (N_THREADS * N_THREADS) + (csrA.hdr[N] % (N_THREADS * N_THREADS) > 0 ? 1 : 0);
-    blockSize.x = (N_THREADS * N_THREADS);
-    gridSize.y = 1;
-    blockSize.y = 1;
-    cudaMemset(d_C, 0, bytes);
-    memset(h_C, 0, bytes);
-
-    t1 = high_resolution_clock::now();
-    sparceMatrixMult3<<<gridSize, blockSize>>>(d_hdr, d_idx, d_data, d_B, d_C, N);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
-    t2 = high_resolution_clock::now();
-    ms = duration_cast<chrono::milliseconds>(t2 - t1);
-    cout << "sparceMatrixMult3 time (ms):\t" << ms.count() << endl;
-
-#ifdef CHECK_CORRECTNESS
-    if (equalMatrix(h_C, h_Correct)) {
-        cout << "The result is correct." << endl;
-    } else {
-        cout << "The result is wrong." << endl;
-    }
-#endif
-    */
-
-    gridSize = {32, 1, 1};
-    blockSize = {1, 1, 1};
-    cudaMemset(d_C, 0, bytes);
-    memset(h_C, 0, bytes);
-
-    for (int i = 0; i < N; i++) {
-
+    for (int i = 0; i < N * N; i++) {
+        memA_half[i] = __float2half(memA[i]);
+        memB_half[i] = __float2half(memB[i]);
     }
 
-    denseMatrixMulTensor<<<gridSize, blockSize>>>(d_A, d_B, d_C);
-    
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_C, d_C, bytes, cudaMemcpyDeviceToHost);
-    t2 = high_resolution_clock::now();
-    ms = duration_cast<milliseconds>(t2 - t1);
-    cout << "denseMatrixMulTensor time (ms):\t" << ms.count() << endl;
+    cudaMalloc(reinterpret_cast<void **>(&gpuC), BYTES_SIZE(float));
+    cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half));
+    cudaMalloc(reinterpret_cast<void **>(&gpuB_half), BYTES_SIZE(half));
+    cudaMalloc(reinterpret_cast<void **>(&gpuCSRData), csrA->hdr[N] * sizeof(half));
+    cudaMalloc(reinterpret_cast<void **>(&gpuCSRHdr), (N + 1) * sizeof(int));
+    cudaMalloc(reinterpret_cast<void **>(&gpuCSRIdx), csrA->hdr[N] * sizeof(int));
 
-
+    cudaMemcpy(gpuC, memC, BYTES_SIZE(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpuA_half, memA_half, BYTES_SIZE(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpuB_half, memB_half, BYTES_SIZE(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpuCSRData, csrA->data, csrA->hdr[N] * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpuCSRHdr, csrA->hdr, (N + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpuCSRIdx, csrA->idx, csrA->hdr[N] * sizeof(int), cudaMemcpyHostToDevice);
 
 #ifdef CHECK_CORRECTNESS
-    if (equalMatrix(h_C, h_Correct)) {
-        cout << "The result is correct." << endl;
-    } else {
-        cout << "The result is wrong." << endl;
-    }
+    PREPARE_FUNC("Matrix mult on CPU");
+    matrixMulCPU(memA_half, memB_half, correctMatrix);
+    END_FUNC("Matrix mult on CPU");
 #endif
 
-    // free the allocated ram
-    free(h_A);
-    free(h_B);
-    free(h_C);
-    free(h_Correct);
-    cudaFree(d_hdr);
-    cudaFree(d_idx);
-    cudaFree(d_data);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    gridSize = {N/16, N/16, 1};
+    blockSize = {32, 1, 1};
+
+    PREPARE_FUNC("WMMA");
+    denseMatrixMulTensor<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC);
+    END_FUNC("WMMA");
+#ifdef CHECK_CORRECTNESS
+    equalMatrix(memC, correctMatrix);
+#endif
+
+    free(memA);
+    free(memB);
+    free(memC);
+    free(correctMatrix);
+    free(memA_half);
+    free(memB_half);
+    cudaFree(gpuC);
+    cudaFree(gpuA_half);
+    cudaFree(gpuB_half);
+    cudaFree(gpuCSRData);
+    cudaFree(gpuCSRHdr);
+    cudaFree(gpuCSRIdx);
 
     return 0;
 }
