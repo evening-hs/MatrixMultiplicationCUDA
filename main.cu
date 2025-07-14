@@ -4,8 +4,8 @@
 #include <mma.h>
 #include <vector>
 
-const int N = 0x1000;// should be a multiple of 32
-const int N_THREADS = 32;
+const unsigned int N = 0x200;// should be a multiple of 32
+const unsigned int N_THREADS = 32;
 
 using namespace std;
 using namespace nvcuda;
@@ -35,7 +35,7 @@ struct CSRMatrix
 {
     int *hdr = nullptr;
     int *idx = nullptr;
-    float *data = nullptr;
+    half *data = nullptr;
 
     explicit CSRMatrix() {}
 
@@ -57,14 +57,14 @@ struct CSRMatrix
         }
 
         idx = static_cast<int *>(malloc(hdr[N] * sizeof(int)));
-        data = static_cast<float *>(malloc(hdr[N] * sizeof(float)));
+        data = static_cast<half *>(malloc(hdr[N] * sizeof(float)));
 
         for (int i = 0, j = 0; i < N * N; i++)
         {
             if (M[i] != 0)
             {
                 idx[j] = i % N;
-                data[j] = M[i];
+                data[j] = __float2half(M[i]);
                 j++;
             }
         }
@@ -85,7 +85,7 @@ struct CSRMatrix
         std::cout << "\nData:\n";
         for (int i = 0; i < hdr[N]; i++)
         {
-            std::cout << data[i] << ' ';
+            std::cout << __half2float(data[i]) << ' ';
         }
         std::cout << '\n';
     }
@@ -123,13 +123,17 @@ void generateSparceMatrix(float *M, float sparsity)
 }
 
 // matrices are equal
-bool equalMatrix(const float *A, const float *B) {
+bool checkMatrix(const float *A, const float *B) {
+#ifdef CHECK_CORRECTNESS
+
     for (int i = 0; i < N * N; i++)
         if (A[i] != B[i]) {
             std::cout << "Value at i = " << i << " mismatch " <<
                 A[i] << "!=" << B[i] << '\n';
             return false;
         }
+    std::cout << "Result is correct\n";
+#endif
     return true;
 }
 
@@ -158,7 +162,7 @@ float *matrixMulCPU(const half *A, const half *B, float *C)
  * Dense matrix multiplication in GPU
  * // O(n) per thread
  */
-__global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, int n)
+__global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C, int n)
 {
 
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
@@ -170,7 +174,7 @@ __global__ void denseMatrixMul(const float *d_A, const float *d_B, float *d_C, i
             // Accumulate results for a single element
             // There's no need here to use reduction  or atomic add, because this
             // thread is the only one accessing this location
-            d_C[rowIdx * n + colIdx] += d_A[rowIdx * n + k] * d_B[k * n + colIdx];
+            d_C[rowIdx * n + colIdx] += __half2float(d_A[rowIdx * n + k]) * __half2float(d_B[k * n + colIdx]);
         }
     }
 }
@@ -210,14 +214,14 @@ __global__ void denseMatrixMulTensor(const half *d_A, const half *d_B, float *d_
  * O(R) R = non zeroes in this row
  */
 __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
-    const float *data, const float *B, float *C, const int n)
+    const half *data, const half *B, float *C, const int n)
 {
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (rowIdx < n && colIdx < n) {
         for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) {
-            C[rowIdx * n + colIdx] += data[k] * B[idx[k] * n + colIdx];
+            C[rowIdx * n + colIdx] += __half2float(data[k]) * __half2float(B[idx[k] * n + colIdx]);
         }
     }
 }
@@ -227,13 +231,13 @@ __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
  * C must be initialized and filled with 0s
  */
 __global__ void sparceMatrixMult2(const int *hdr, const int *idx,
-    const float *data, const float *B, float *C, const int n) {
+    const half *data, const half *B, float *C, const int n) {
     int k = blockDim.x * blockIdx.x + threadIdx.x;
     if (k < n) {
         int i = 0;
         for (int row = 0; row < n; row++) {
             for (; i < hdr[row + 1]; i++) {
-                atomicAdd(&C[row * n + k], data[i] * B[idx[i] * n + k]);
+                atomicAdd(&C[row * n + k], __half2float(data[i]) * __half2float(B[idx[i] * n + k]));
             }
         }
     }
@@ -244,14 +248,14 @@ __global__ void sparceMatrixMult2(const int *hdr, const int *idx,
  * C must be initialized and filled with 0s
  */
 __global__ void sparceMatrixMult3(const int *hdr, const int *idx,
-    const float *data, const float *B, float *C, const int n) {
+    const half *data, const half *B, float *C, const int n) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < hdr[n]) {
         int row = 0;
         while (row < n && i >= hdr[row + 1]) row ++;
 
         for (int k = 0; k < n; k++) {
-            atomicAdd(&C[row * n + k], data[i] * B[idx[i] * n + k]);
+            atomicAdd(&C[row * n + k], __half2float(data[i]) * __half2float(B[idx[i] * n + k]));
         }
     }
 }
@@ -302,15 +306,54 @@ int main() {
     END_FUNC("Matrix mult on CPU");
 #endif
 
+    gridSize = {
+        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+        1};
+    blockSize = {N_THREADS, N_THREADS, 1};
+    PREPARE_FUNC("Matrix mult on GPU");
+    denseMatrixMul<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
+    END_FUNC("Matrix mult on GPU");
+
     gridSize = {N/16, N/16, 1};
     blockSize = {32, 1, 1};
-
     PREPARE_FUNC("WMMA");
     denseMatrixMulTensor<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC);
     END_FUNC("WMMA");
-#ifdef CHECK_CORRECTNESS
-    equalMatrix(memC, correctMatrix);
-#endif
+    checkMatrix(memC, correctMatrix);
+
+    gridSize = {
+        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+        1};
+    blockSize = {N_THREADS, N_THREADS, 1};
+    PREPARE_FUNC("SpMM Algorithm 1");
+    sparceMatrixMult1<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
+        gpuCSRData, gpuB_half, gpuC, N);
+    END_FUNC("SpMM Algorithm 1");
+    checkMatrix(memC, correctMatrix);
+
+    gridSize = {
+        N / (N_THREADS * N_THREADS) + (N % (N_THREADS * N_THREADS) > 0 ? 1 : 0),
+        1, 1};
+    blockSize = {N_THREADS * N_THREADS, 1, 1};
+    PREPARE_FUNC("SpMM Algorithm 2");
+    sparceMatrixMult2<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
+        gpuCSRData, gpuB_half, gpuC, N);
+    END_FUNC("SpMM Algorithm 2");
+    checkMatrix(memC, correctMatrix);
+
+    gridSize = {
+        csrA->hdr[N] / (N_THREADS * N_THREADS) + (csrA->hdr[N] % (N_THREADS * N_THREADS) > 0 ? 1 : 0),
+        1,
+        1
+    };
+    blockSize = {N_THREADS * N_THREADS, 1, 1};
+    PREPARE_FUNC("SpMM Algorithm 3");
+    sparceMatrixMult3<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
+        gpuCSRData, gpuB_half, gpuC, N);
+    END_FUNC("SpMM Algorithm 3");
+    checkMatrix(memC, correctMatrix);
 
     free(memA);
     free(memB);
