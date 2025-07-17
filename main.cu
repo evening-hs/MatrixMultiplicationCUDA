@@ -2,10 +2,12 @@
 #include <iostream>
 #include <chrono>
 #include <mma.h>
-#include <vector>
 
-const unsigned int N = 0x200;// should be a multiple of 32
+#include "Matrix.cuh"
+
+const unsigned int N = 0x1000;// should be a multiple of 32 (0x20)
 const unsigned int N_THREADS = 32;
+const float SPARSITY = 0.999;
 
 using namespace std;
 using namespace nvcuda;
@@ -28,7 +30,7 @@ using std::chrono::milliseconds;
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
                         t2 = high_resolution_clock::now(); \
                         ms = duration_cast<milliseconds>(t2 - t1); \
-                        cout << _name << " time (ms):\t" << ms.count() << endl; \
+                        printf("%20s time (ms): %10d\n", _name, ms.count());
 
 // CSR Matrix structure
 struct CSRMatrix
@@ -261,6 +263,8 @@ __global__ void sparceMatrixMult3(const int *hdr, const int *idx,
 }
 
 int main() {
+    Matrix myMatrix = Matrix("/home/huertasg/Dev/MatrixMultiplicationCUDA/out.txt");
+
     srand(time(nullptr));
 
     float *memA = MALLOC_MATRIX(float);
@@ -277,7 +281,7 @@ int main() {
     dim3 gridSize, blockSize;
     cudaError_t error;
 
-    generateSparceMatrix(memA, 0.0);
+    generateSparceMatrix(memA, SPARSITY);
     generateMatrix(memB);
     CSRMatrix *csrA = new CSRMatrix(memA);
 

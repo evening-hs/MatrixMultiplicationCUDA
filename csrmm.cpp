@@ -4,6 +4,8 @@
 
 #include <iostream>
 
+#include "Matrix.cuh"
+
 // Matrix size (N*N)
 #define N 3
 

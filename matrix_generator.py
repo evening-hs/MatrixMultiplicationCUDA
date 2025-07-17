@@ -62,6 +62,7 @@ def generate_matrix(output: str, num_rows: int, num_cols: int, sparsity: float,
 
     if output is not None:
         with open(output, 'w') as f:
+            f.write(f"{num_rows} {num_cols}\n")
             f.write(matrix_str)
     else:
         print(matrix_str)
