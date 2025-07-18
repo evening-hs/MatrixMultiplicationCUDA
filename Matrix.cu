@@ -28,5 +28,15 @@ Matrix::Matrix(const string &filename) {
 
 Matrix::~Matrix() {
     free(this->data);
+}
+
+void Matrix::print() const {
+    std::cout << rows << ' ' << cols << "\n===\n";
+    for (int i = 0; i < rows; i ++) {
+        for (int j = 0; j < cols; j++) {
+            cout << __half2float(data[i * cols + j]) << " ";
+        }
+        cout << "\n";
+    }
 };
 

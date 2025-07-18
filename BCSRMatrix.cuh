@@ -12,8 +12,12 @@ public:
     int *hdr = nullptr;
     int *idx = nullptr;
     Matrix **data = nullptr;
+    int blockRows = 0;
+    int nonZeros = 0;
     explicit BCSRMatrix(const Matrix &matrix);
     ~BCSRMatrix();
+
+    void print() const;
 };
 
 

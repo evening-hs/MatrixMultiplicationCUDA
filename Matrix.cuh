@@ -14,6 +14,8 @@ public:
     Matrix(int rows, int cols);
     explicit Matrix(const string &filename);
     ~Matrix();
+
+    void print() const;
 };
 
 
