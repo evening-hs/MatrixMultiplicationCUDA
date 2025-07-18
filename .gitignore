@@ -55,5 +55,4 @@ build/
 cmake-build-*/
 
 # Output files
-*.txt*
 *.out*

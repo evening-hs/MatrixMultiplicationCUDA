@@ -3,11 +3,11 @@
 #include <chrono>
 #include <mma.h>
 
+#include "CSRMatrix.cuh"
 #include "Matrix.cuh"
 
-const unsigned int N = 0x1000;// should be a multiple of 32 (0x20)
+unsigned int N = 0;
 const unsigned int N_THREADS = 32;
-const float SPARSITY = 0.999;
 
 using namespace std;
 using namespace nvcuda;
@@ -26,105 +26,12 @@ using std::chrono::milliseconds;
 #define END_FUNC(_name) cudaDeviceSynchronize(); \
                         error = cudaGetLastError(); \
                         if (error != cudaSuccess) \
-                            cout << "CUDA error: %s\n" << cudaGetErrorString(error); \
+                            cout << "CUDA error: " << cudaGetErrorString(error) << '\n'; \
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
                         t2 = high_resolution_clock::now(); \
                         ms = duration_cast<milliseconds>(t2 - t1); \
                         printf("%20s time (ms): %10d\n", _name, ms.count());
 
-// CSR Matrix structure
-struct CSRMatrix
-{
-    int *hdr = nullptr;
-    int *idx = nullptr;
-    half *data = nullptr;
-
-    explicit CSRMatrix() {}
-
-    explicit CSRMatrix(const float *M)
-    {
-        hdr = static_cast<int *>(malloc((N + 1) * sizeof(int)));
-        hdr[0] = 0;
-
-        for (int i = 0; i < N; i++)
-        {
-            hdr[i + 1] = hdr[i];
-            for (int j = 0; j < N; j++)
-            {
-                if (M[i * N + j] != 0)
-                {
-                    hdr[i + 1]++;
-                }
-            }
-        }
-
-        idx = static_cast<int *>(malloc(hdr[N] * sizeof(int)));
-        data = static_cast<half *>(malloc(hdr[N] * sizeof(float)));
-
-        for (int i = 0, j = 0; i < N * N; i++)
-        {
-            if (M[i] != 0)
-            {
-                idx[j] = i % N;
-                data[j] = __float2half(M[i]);
-                j++;
-            }
-        }
-    }
-
-    void print() const
-    {
-        std::cout << "Header:\n";
-        for (int i = 0; i < N + 1; i++)
-        {
-            std::cout << hdr[i] << ' ';
-        }
-        std::cout << "\nIndexes:\n";
-        for (int i = 0; i < hdr[N]; i++)
-        {
-            std::cout << idx[i] << ' ';
-        }
-        std::cout << "\nData:\n";
-        for (int i = 0; i < hdr[N]; i++)
-        {
-            std::cout << __half2float(data[i]) << ' ';
-        }
-        std::cout << '\n';
-    }
-
-    ~CSRMatrix()
-    {
-        free(hdr);
-        free(idx);
-        free(data);
-    }
-};
-
-// UTILITIES
-
-// generate random data for the matrix
-void generateMatrix(float *M)
-{
-    for (int i = 0; i < N * N; i++)
-    {
-        M[i] = static_cast<float>(random() % 100);
-    }
-}
-
-// generate a random sparce matrix with the specified sparsity percentage
-void generateSparceMatrix(float *M, float sparsity)
-{
-    memset(M, 0.0f, N * N * sizeof(float));
-    for (int i = 0; i < N * N; i++)
-    {
-        if (static_cast<float>(random()) / static_cast<float> (RAND_MAX) > sparsity)
-        {
-            M[i] = static_cast<float>(random() % 100);
-        }
-    }
-}
-
-// matrices are equal
 bool checkMatrix(const float *A, const float *B) {
 #ifdef CHECK_CORRECTNESS
 
@@ -164,9 +71,8 @@ float *matrixMulCPU(const half *A, const half *B, float *C)
  * Dense matrix multiplication in GPU
  * // O(n) per thread
  */
-__global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C, int n)
+__global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C, const int n)
 {
-
     int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -185,12 +91,12 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C, int
  * Multiply two dense matrices using tensors wmma
  */
 
-__global__ void denseMatrixMulTensor(const half *d_A, const half *d_B, float *d_C) {
+__global__ void denseMatrixMulTensor(const half *d_A, const half *d_B, float *d_C, int n) {
     // Calculate which 16x16 tile this thread block handles
     int warp_row = blockIdx.y * 16;
     int warp_col = blockIdx.x * 16;
 
-    if (warp_row >= N || warp_col >= N) return;
+    if (warp_row >= n || warp_col >= n) return;
 
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
@@ -199,13 +105,13 @@ __global__ void denseMatrixMulTensor(const half *d_A, const half *d_B, float *d_
     wmma::fill_fragment(c_frag, 0.0f);
 
     // Accumulate over K dimension in 16x16 chunks
-    for (int k = 0; k < N; k += 16) {
-        wmma::load_matrix_sync(a_frag, d_A + warp_row * N + k, N);
-        wmma::load_matrix_sync(b_frag, d_B + k * N + warp_col, N);
+    for (int k = 0; k < n; k += 16) {
+        wmma::load_matrix_sync(a_frag, d_A + warp_row * n + k, n);
+        wmma::load_matrix_sync(b_frag, d_B + k * n + warp_col, n);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
     }
 
-    wmma::store_matrix_sync(d_C + warp_row * N + warp_col, c_frag, N, wmma::mem_row_major);
+    wmma::store_matrix_sync(d_C + warp_row * n + warp_col, c_frag, n, wmma::mem_row_major);
 }
 
 
@@ -263,16 +169,17 @@ __global__ void sparceMatrixMult3(const int *hdr, const int *idx,
 }
 
 int main() {
-    Matrix myMatrix = Matrix("/home/huertasg/Dev/MatrixMultiplicationCUDA/out.txt");
+    const Matrix *matrixA = new Matrix("../MatrixA.out.txt");
+    const Matrix *matrixB = new Matrix("../MatrixB.out.txt");
+    assert(matrixA->cols == matrixB->rows);
+    const Matrix *matrixC = new Matrix(matrixA->rows, matrixA->cols);
 
     srand(time(nullptr));
 
-    float *memA = MALLOC_MATRIX(float);
-    float *memB = MALLOC_MATRIX(float);
-    float *memC = MALLOC_MATRIX(float);
-    float *correctMatrix = MALLOC_MATRIX(float);
-    half *memA_half = MALLOC_MATRIX(half);
-    half *memB_half = MALLOC_MATRIX(half);
+    const half *memA = matrixA->data;
+    const half *memB = matrixB->data;;
+    auto *memC = MALLOC_MATRIX(float);
+    auto *correctMatrix = MALLOC_MATRIX(float);
     float *gpuC;
     half *gpuA_half, *gpuB_half, *gpuCSRData;
     int *gpuCSRHdr, *gpuCSRIdx;
@@ -281,14 +188,7 @@ int main() {
     dim3 gridSize, blockSize;
     cudaError_t error;
 
-    generateSparceMatrix(memA, SPARSITY);
-    generateMatrix(memB);
-    CSRMatrix *csrA = new CSRMatrix(memA);
-
-    for (int i = 0; i < N * N; i++) {
-        memA_half[i] = __float2half(memA[i]);
-        memB_half[i] = __float2half(memB[i]);
-    }
+    const auto *csrA = new CSRMatrix(*matrixA);
 
     cudaMalloc(reinterpret_cast<void **>(&gpuC), BYTES_SIZE(float));
     cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half));
@@ -297,16 +197,15 @@ int main() {
     cudaMalloc(reinterpret_cast<void **>(&gpuCSRHdr), (N + 1) * sizeof(int));
     cudaMalloc(reinterpret_cast<void **>(&gpuCSRIdx), csrA->hdr[N] * sizeof(int));
 
-    cudaMemcpy(gpuC, memC, BYTES_SIZE(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuA_half, memA_half, BYTES_SIZE(half), cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuB_half, memB_half, BYTES_SIZE(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpuA_half, matrixA->data, BYTES_SIZE(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpuB_half, matrixB->data, BYTES_SIZE(half), cudaMemcpyHostToDevice);
     cudaMemcpy(gpuCSRData, csrA->data, csrA->hdr[N] * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(gpuCSRHdr, csrA->hdr, (N + 1) * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(gpuCSRIdx, csrA->idx, csrA->hdr[N] * sizeof(int), cudaMemcpyHostToDevice);
 
 #ifdef CHECK_CORRECTNESS
     PREPARE_FUNC("Matrix mult on CPU");
-    matrixMulCPU(memA_half, memB_half, correctMatrix);
+    matrixMulCPU(memA, memB, correctMatrix);
     END_FUNC("Matrix mult on CPU");
 #endif
 
@@ -322,7 +221,7 @@ int main() {
     gridSize = {N/16, N/16, 1};
     blockSize = {32, 1, 1};
     PREPARE_FUNC("WMMA");
-    denseMatrixMulTensor<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC);
+    denseMatrixMulTensor<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
     END_FUNC("WMMA");
     checkMatrix(memC, correctMatrix);
 
@@ -359,12 +258,8 @@ int main() {
     END_FUNC("SpMM Algorithm 3");
     checkMatrix(memC, correctMatrix);
 
-    free(memA);
-    free(memB);
     free(memC);
     free(correctMatrix);
-    free(memA_half);
-    free(memB_half);
     cudaFree(gpuC);
     cudaFree(gpuA_half);
     cudaFree(gpuB_half);

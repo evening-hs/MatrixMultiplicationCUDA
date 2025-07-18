@@ -6,6 +6,8 @@
 Matrix::Matrix(int rows, int cols) {
     this->rows = rows;
     this->cols = cols;
+    this->nonZeros = 0;
+    this->data = static_cast<half *>(malloc((rows * cols) * sizeof(half)));
 }
 
 Matrix::Matrix(const string &filename) {
@@ -15,12 +17,16 @@ Matrix::Matrix(const string &filename) {
     freopen(filename.c_str(), "r", stdin);
 
     std::cin >> rows >> cols;
-    data.resize(rows * cols);
+    this->data = static_cast<half *>(malloc((rows * cols) * sizeof(half)));
+
     for (int i = 0; i < rows * cols; i++) {
         std::cin >> v;
-        data[i] = __float2half(v);
+        if (v != 0.0f) this->nonZeros++;
+        this->data[i] = __float2half(v);
     }
 }
 
-Matrix::~Matrix() = default;
+Matrix::~Matrix() {
+    free(this->data);
+};
 
