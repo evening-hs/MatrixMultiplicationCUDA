@@ -15,7 +15,7 @@ public:
     int *hdr = nullptr;
     int *idx = nullptr;
     half *data = nullptr;
-    CSRMatrix(const Matrix &matrix);
+    explicit CSRMatrix(const Matrix &matrix);
     ~CSRMatrix();
 };
 

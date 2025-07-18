@@ -24,6 +24,8 @@ add_executable(matrix_multiplication main.cu
         Matrix.cu
         CSRMatrix.cu
         CSRMatrix.cuh
+        BCSRMatrix.cu
+        BCSRMatrix.cuh
 )
 
 # Set CUDA specific properties

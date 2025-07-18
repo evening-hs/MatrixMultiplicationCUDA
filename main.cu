@@ -3,6 +3,7 @@
 #include <chrono>
 #include <mma.h>
 
+#include "BCSRMatrix.cuh"
 #include "CSRMatrix.cuh"
 #include "Matrix.cuh"
 
@@ -168,16 +169,19 @@ __global__ void sparceMatrixMult3(const int *hdr, const int *idx,
     }
 }
 
+/**
+ *
+ *
+ */
 int main() {
-    const Matrix *matrixA = new Matrix("../MatrixA.out.txt");
-    const Matrix *matrixB = new Matrix("../MatrixB.out.txt");
+    const Matrix *matrixA = new Matrix("../MatrixA.mat");
+    const Matrix *matrixB = new Matrix("../MatrixB.mat");
     assert(matrixA->cols == matrixB->rows);
+    N = matrixA->cols;
     const Matrix *matrixC = new Matrix(matrixA->rows, matrixA->cols);
 
     srand(time(nullptr));
 
-    const half *memA = matrixA->data;
-    const half *memB = matrixB->data;;
     auto *memC = MALLOC_MATRIX(float);
     auto *correctMatrix = MALLOC_MATRIX(float);
     float *gpuC;
@@ -189,10 +193,11 @@ int main() {
     cudaError_t error;
 
     const auto *csrA = new CSRMatrix(*matrixA);
+    const auto *bcsrA = new BCSRMatrix(*matrixA);
 
-    cudaMalloc(reinterpret_cast<void **>(&gpuC), BYTES_SIZE(float));
     cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half));
     cudaMalloc(reinterpret_cast<void **>(&gpuB_half), BYTES_SIZE(half));
+    cudaMalloc(reinterpret_cast<void **>(&gpuC), BYTES_SIZE(float));
     cudaMalloc(reinterpret_cast<void **>(&gpuCSRData), csrA->hdr[N] * sizeof(half));
     cudaMalloc(reinterpret_cast<void **>(&gpuCSRHdr), (N + 1) * sizeof(int));
     cudaMalloc(reinterpret_cast<void **>(&gpuCSRIdx), csrA->hdr[N] * sizeof(int));
@@ -205,7 +210,7 @@ int main() {
 
 #ifdef CHECK_CORRECTNESS
     PREPARE_FUNC("Matrix mult on CPU");
-    matrixMulCPU(memA, memB, correctMatrix);
+    matrixMulCPU(matrixA->data, matrixB->data, correctMatrix);
     END_FUNC("Matrix mult on CPU");
 #endif
 
