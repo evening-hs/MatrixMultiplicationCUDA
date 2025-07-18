@@ -18,6 +18,7 @@ public:
     ~BCSRMatrix();
 
     void print() const;
+    void copyToDevice(int **gpuHdr, int **gpuIdx, half ***gpuData) const;
 };
 
 

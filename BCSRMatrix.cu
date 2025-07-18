@@ -7,6 +7,13 @@
 #include <assert.h>
 #include <iostream>
 
+#define ASSERT_CUDA_SUCCESS error = cudaGetLastError(); \
+                            if (error != cudaSuccess) \
+                            cout << "BCSRMatrix::copyToDevice CUDA " \
+                            "error: " << cudaGetErrorString(error) << '\n'; \
+                            assert(error == cudaSuccess);
+
+
 BCSRMatrix::BCSRMatrix(const Matrix &matrix) {
     // find dense 16x16 blocks
     blockRows = matrix.rows / 16;
@@ -74,4 +81,46 @@ void BCSRMatrix::print() const {
             cout << '\n';
         }
     }
+}
+
+void BCSRMatrix::copyToDevice(int **gpuHdr, int **gpuIdx, half ***gpuData)
+const {
+    cudaError error;
+
+    cudaMalloc(reinterpret_cast<void **>(gpuHdr),
+               (blockRows + 1) * sizeof(int));
+    ASSERT_CUDA_SUCCESS;
+
+    cudaMalloc(reinterpret_cast<void **>(gpuIdx),
+               hdr[blockRows] * sizeof(int));
+    ASSERT_CUDA_SUCCESS;
+
+    cudaMalloc(reinterpret_cast<void **>(gpuData),
+               hdr[blockRows] * sizeof(half*));
+    ASSERT_CUDA_SUCCESS;
+
+    cudaMemcpy(*gpuHdr, hdr, (blockRows + 1) * sizeof(int),
+               cudaMemcpyHostToDevice);
+    ASSERT_CUDA_SUCCESS;
+    cudaMemcpy(*gpuIdx, idx, hdr[blockRows] * sizeof(int),
+               cudaMemcpyHostToDevice);
+    ASSERT_CUDA_SUCCESS;
+
+    const auto cudaPtrs = static_cast<half **>(malloc(hdr[blockRows] * sizeof(half)));
+
+    for (int i = 0; i < hdr[blockRows]; i ++) {
+        half *tmp;
+        cudaMalloc(&tmp, 16 * 16 * sizeof(half));
+        ASSERT_CUDA_SUCCESS;
+        cudaMemcpy(tmp, data[i]->data, 16 * 16 * sizeof(half),
+            cudaMemcpyHostToDevice);
+        ASSERT_CUDA_SUCCESS;
+        cudaPtrs[i] = tmp;
+    }
+
+    cudaMemcpy(*gpuData, cudaPtrs, hdr[blockRows] * sizeof(half *),
+        cudaMemcpyHostToDevice);
+    ASSERT_CUDA_SUCCESS;
+
+    free(cudaPtrs);
 }

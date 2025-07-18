@@ -193,8 +193,8 @@ int main() {
     auto *memC = MALLOC_MATRIX(float);
     auto *correctMatrix = MALLOC_MATRIX(float);
     float *gpuC;
-    half *gpuA_half, *gpuB_half, *gpuCSRData;
-    int *gpuCSRHdr, *gpuCSRIdx;
+    half *gpuA_half, *gpuB_half, *gpuCSRData, **gpuBCSRData;
+    int *gpuCSRHdr, *gpuCSRIdx, *gpuBCSRHdr, *gpuBCSRIdx;
     chrono::time_point<chrono::system_clock, chrono::system_clock::duration> t1,
             t2;
     duration<long, ratio<1, 1000> > ms;
@@ -203,6 +203,8 @@ int main() {
 
     const auto *csrA = new CSRMatrix(*matrixA);
     const auto *bcsrA = new BCSRMatrix(*matrixA);
+
+    //bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData);
 
     cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half));
     cudaMalloc(reinterpret_cast<void **>(&gpuB_half), BYTES_SIZE(half));
