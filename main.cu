@@ -177,7 +177,8 @@ __global__ void sparseMatrixMult3(const int *hdr, const int *idx,
 /**
  * Multiply a BCSR matrix and a dense matrix using tensors
  */
-__global__ void sparseMatrixMulTensor(const int *hdr, const half *A,
+__global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
+                                      const half *A,
                                       const half *B, float *C,
                                       const unsigned int n) {
     const unsigned int warpRow = blockIdx.y * 16;
@@ -192,8 +193,8 @@ __global__ void sparseMatrixMulTensor(const int *hdr, const half *A,
     wmma::fill_fragment(c_frag, 0.0f);
 
     for (int k = hdr[warpRow / 16]; k < hdr[warpRow / 16 + 1]; k++) {
-        wmma::load_matrix_sync(a_frag, A + warpRow * n + k * 16, n);
-        wmma::load_matrix_sync(b_frag, B + k * 16 * n + warpCol, n);
+        wmma::load_matrix_sync(a_frag, A + warpRow * n + idx[k] * 16, n);
+        wmma::load_matrix_sync(b_frag, B + idx[k] * 16 * n + warpCol, n);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
     }
 
@@ -303,8 +304,10 @@ int main() {
     END_FUNC("SpMM Algorithm 3");
     checkMatrix(memC, correctMatrix);
 
+    gridSize = {N / 16, N / 16, 1};
+    blockSize = {32, 1, 1};
     PREPARE_FUNC("SpMM with Tensors Algorithm 1");
-    sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuA_half,
+    sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx, gpuA_half,
                                                   gpuB_half, gpuC, N);
     END_FUNC("SpMM with Tensors Algorithm 1");
     checkMatrix(memC, correctMatrix);
