@@ -8,7 +8,7 @@
 #include "Matrix.cuh"
 
 unsigned int N = 0;
-const unsigned int N_THREADS = 32;
+constexpr unsigned int N_THREADS = 32;
 
 using namespace std;
 using namespace nvcuda;
@@ -70,9 +70,9 @@ float *matrixMulCPU(const half *A, const half *B, float *C) {
  * // O(n) per thread
  */
 __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
-                               const int n) {
-    int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
-    int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
+                               const unsigned int n) {
+    const unsigned int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
+    const unsigned int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (rowIdx < n && colIdx < n) {
         for (int k = 0; k < n; k++) {
@@ -90,10 +90,10 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
  */
 
 __global__ void denseMatrixMulTensor(const half *d_A, const half *d_B,
-                                     float *d_C, int n) {
+                                     float *d_C, const unsigned int n) {
     // Calculate which 16x16 tile this thread block handles
-    int warp_row = blockIdx.y * 16;
-    int warp_col = blockIdx.x * 16;
+    const unsigned int warp_row = blockIdx.y * 16;
+    const unsigned int warp_col = blockIdx.x * 16;
 
     if (warp_row >= n || warp_col >= n) return;
 
@@ -121,11 +121,11 @@ __global__ void denseMatrixMulTensor(const half *d_A, const half *d_B,
  *
  * O(R) R = non zeroes in this row
  */
-__global__ void sparceMatrixMult1(const int *hdr, const int *idx,
+__global__ void sparseMatrixMult1(const int *hdr, const int *idx,
                                   const half *data, const half *B, float *C,
-                                  const int n) {
-    int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
-    int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
+                                  const unsigned int n) {
+    const unsigned int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
+    const unsigned int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (rowIdx < n && colIdx < n) {
         for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) {
@@ -139,10 +139,10 @@ __global__ void sparceMatrixMult1(const int *hdr, const int *idx,
  * Multiply a CSR matrix x a dense matrix
  * C must be initialized and filled with 0s
  */
-__global__ void sparceMatrixMult2(const int *hdr, const int *idx,
+__global__ void sparseMatrixMult2(const int *hdr, const int *idx,
                                   const half *data, const half *B, float *C,
-                                  const int n) {
-    int k = blockDim.x * blockIdx.x + threadIdx.x;
+                                  const unsigned int n) {
+    const unsigned int k = blockDim.x * blockIdx.x + threadIdx.x;
     if (k < n) {
         int i = 0;
         for (int row = 0; row < n; row++) {
@@ -159,10 +159,10 @@ __global__ void sparceMatrixMult2(const int *hdr, const int *idx,
  * Multiply a CSR matrix x a dense matrix
  * C must be initialized and filled with 0s
  */
-__global__ void sparceMatrixMult3(const int *hdr, const int *idx,
+__global__ void sparseMatrixMult3(const int *hdr, const int *idx,
                                   const half *data, const half *B, float *C,
-                                  const int n) {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
+                                  const unsigned int n) {
+    const unsigned int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < hdr[n]) {
         int row = 0;
         while (row < n && i >= hdr[row + 1]) row++;
@@ -177,34 +177,51 @@ __global__ void sparceMatrixMult3(const int *hdr, const int *idx,
 /**
  * Multiply a BCSR matrix and a dense matrix using tensors
  */
-__global__ void sparseMatrixMulTensor() {
-    // TODO
+__global__ void sparseMatrixMulTensor(const int *hdr, const half *A,
+                                      const half *B, float *C,
+                                      const unsigned int n) {
+    const unsigned int warpRow = blockIdx.y * 16;
+    const unsigned int warpCol = blockIdx.x * 16;
+
+    if (warpRow >= n || warpCol>= n) return;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    for (int k = hdr[warpRow / 16]; k < hdr[warpRow / 16 + 1]; k++) {
+        wmma::load_matrix_sync(a_frag, A + warpRow * n + k * 16, n);
+        wmma::load_matrix_sync(b_frag, B + k * 16 * n + warpCol, n);
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+    }
+
+    wmma::store_matrix_sync(C + warpRow * n + warpCol, c_frag, n,
+                            wmma::mem_row_major);
 }
 
+
 int main() {
-    const Matrix *matrixA = new Matrix("../MatrixA_small.mat");
-    const Matrix *matrixB = new Matrix("../MatrixB_small.mat");
+    const Matrix *matrixA = new Matrix("../MatrixA.mat");
+    const Matrix *matrixB = new Matrix("../MatrixB.mat");
     assert(matrixA->cols == matrixB->rows);
     N = matrixA->cols;
-    const Matrix *matrixC = new Matrix(matrixA->rows, matrixA->cols);
-
-    srand(time(nullptr));
 
     auto *memC = MALLOC_MATRIX(float);
     auto *correctMatrix = MALLOC_MATRIX(float);
     float *gpuC;
     half *gpuA_half, *gpuB_half, *gpuCSRData, **gpuBCSRData;
     int *gpuCSRHdr, *gpuCSRIdx, *gpuBCSRHdr, *gpuBCSRIdx;
-    chrono::time_point<chrono::system_clock, chrono::system_clock::duration> t1,
-            t2;
-    duration<long, ratio<1, 1000> > ms;
+    chrono::time_point<chrono::system_clock> t1, t2;
+    auto ms = duration_cast<milliseconds>(t2 - t1);
     dim3 gridSize, blockSize;
     cudaError_t error;
 
     const auto *csrA = new CSRMatrix(*matrixA);
     const auto *bcsrA = new BCSRMatrix(*matrixA);
 
-    //bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData);
+    bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData);
 
     cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half));
     cudaMalloc(reinterpret_cast<void **>(&gpuB_half), BYTES_SIZE(half));
@@ -257,7 +274,7 @@ int main() {
     };
     blockSize = {N_THREADS, N_THREADS, 1};
     PREPARE_FUNC("SpMM Algorithm 1");
-    sparceMatrixMult1<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
+    sparseMatrixMult1<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM Algorithm 1");
     checkMatrix(memC, correctMatrix);
@@ -268,7 +285,7 @@ int main() {
     };
     blockSize = {N_THREADS * N_THREADS, 1, 1};
     PREPARE_FUNC("SpMM Algorithm 2");
-    sparceMatrixMult2<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
+    sparseMatrixMult2<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM Algorithm 2");
     checkMatrix(memC, correctMatrix);
@@ -281,9 +298,15 @@ int main() {
     };
     blockSize = {N_THREADS * N_THREADS, 1, 1};
     PREPARE_FUNC("SpMM Algorithm 3");
-    sparceMatrixMult3<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
+    sparseMatrixMult3<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM Algorithm 3");
+    checkMatrix(memC, correctMatrix);
+
+    PREPARE_FUNC("SpMM with Tensors Algorithm 1");
+    sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuA_half,
+                                                  gpuB_half, gpuC, N);
+    END_FUNC("SpMM with Tensors Algorithm 1");
     checkMatrix(memC, correctMatrix);
 
     free(memC);
@@ -294,6 +317,9 @@ int main() {
     cudaFree(gpuCSRData);
     cudaFree(gpuCSRHdr);
     cudaFree(gpuCSRIdx);
+    cudaFree(gpuBCSRData);
+    cudaFree(gpuBCSRHdr);
+    cudaFree(gpuBCSRIdx);
 
     return 0;
 }

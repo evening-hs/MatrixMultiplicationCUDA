@@ -4,7 +4,7 @@
 
 #include "BCSRMatrix.cuh"
 
-#include <assert.h>
+#include <cassert>
 #include <iostream>
 
 #define ASSERT_CUDA_SUCCESS error = cudaGetLastError(); \
@@ -106,7 +106,7 @@ const {
                cudaMemcpyHostToDevice);
     ASSERT_CUDA_SUCCESS;
 
-    const auto cudaPtrs = static_cast<half **>(malloc(hdr[blockRows] * sizeof(half)));
+    const auto cudaPtrs = static_cast<half **>(malloc(hdr[blockRows] * sizeof(half *)));
 
     for (int i = 0; i < hdr[blockRows]; i ++) {
         half *tmp;
