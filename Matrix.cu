@@ -11,7 +11,7 @@ Matrix::Matrix(int rows, int cols) {
 }
 
 Matrix::Matrix(const string &filename) {
-    this->rows = this->cols = 0;
+    this->rows = this->cols = this->nonZeros = 0;
 
     float v;
     freopen(filename.c_str(), "r", stdin);
