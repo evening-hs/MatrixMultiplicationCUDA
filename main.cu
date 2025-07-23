@@ -6,9 +6,12 @@
 #include "BCSRMatrix.cuh"
 #include "CSRMatrix.cuh"
 #include "Matrix.cuh"
+#include "miscutil.h"
 
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
+string MATRIX_A_PATH = "../tests/MatrixA_512_checkerboard.mat";
+string MATRIX_B_PATH = "../tests/MatrixA_512_random.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -31,21 +34,10 @@ using std::chrono::milliseconds;
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
                         t2 = high_resolution_clock::now(); \
                         ms = duration_cast<milliseconds>(t2 - t1); \
-                        printf("%20s time (ms): %10d\n", _name, ms.count());
-
-bool checkMatrix(const float *A, const float *B) {
-#ifdef CHECK_CORRECTNESS
-
-    for (int i = 0; i < N * N; i++)
-        if (A[i] != B[i]) {
-            std::cout << "Value at i = " << i << " mismatch " <<
-                    A[i] << "!=" << B[i] << '\n';
-            return false;
-        }
-    std::cout << "Result is correct\n";
-#endif
-    return true;
-}
+                        printf("%20s time (ms): %10d\n", _name, (int) ms.count()); \
+                        printf("%25s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
+                        printf("%21s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
+                        printf("%7s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
 
 /**
  * Dense matrix multiplication in CPU
@@ -201,11 +193,16 @@ __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
                             wmma::mem_row_major);
 }
 
-int main() {
+int main(const int argc, const char **argv) {
+    if (argc == 3) {
+        MATRIX_A_PATH = argv[1];
+        MATRIX_B_PATH = argv[2];
+    }
+
     cout << "Reading matrix A...\n";
-    const Matrix *matrixA = new Matrix("../Matrix_1024_checkerboard.mat");
+    const Matrix *matrixA = new Matrix(MATRIX_A_PATH);
     cout << "Reading matrix B...\n";
-    const Matrix *matrixB = new Matrix("../Matrix_1024_dense.mat");
+    const Matrix *matrixB = new Matrix(MATRIX_B_PATH);
     assert(matrixA->cols == matrixB->rows);
     N = matrixA->cols;
 
@@ -244,53 +241,58 @@ int main() {
     cudaMemcpy(gpuCSRIdx, csrA->idx, csrA->hdr[N] * sizeof(int),
                cudaMemcpyHostToDevice);
 
+    /* ========================== DENSE ON CPU ========================== */
 #ifdef CHECK_CORRECTNESS
-    PREPARE_FUNC("Matrix mult on CPU");
+    PREPARE_FUNC("Dense on CPU");
     matrixMulCPU(matrixA->data, matrixB->data, correctMatrix);
-    END_FUNC("Matrix mult on CPU");
+    END_FUNC("Dense on CPU");
 #endif
 
+    /* ========================== DENSE ON GPU ========================== */
     gridSize = {
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         1
     };
     blockSize = {N_THREADS, N_THREADS, 1};
-    PREPARE_FUNC("Matrix mult on GPU");
+    PREPARE_FUNC("Dense on GPU");
     denseMatrixMul<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
-    END_FUNC("Matrix mult on GPU");
+    END_FUNC("Dense on GPU");
+    // Use dense on GPU as correct function
+    memcpy(correctMatrix, memC, N * N * sizeof(float));
 
+    /* ========================== DENSE WMMA ========================== */
     gridSize = {N / 16, N / 16, 1};
     blockSize = {32, 1, 1};
-    PREPARE_FUNC("WMMA");
+    PREPARE_FUNC("Dense WMMA");
     denseMatrixMulTensor<<<gridSize, blockSize>>
             >(gpuA_half, gpuB_half, gpuC, N);
-    END_FUNC("WMMA");
-    checkMatrix(memC, correctMatrix);
+    END_FUNC("Dense WMMA");
 
+    /* ========================== SpMM 1 ========================== */
     gridSize = {
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         1
     };
     blockSize = {N_THREADS, N_THREADS, 1};
-    PREPARE_FUNC("SpMM Algorithm 1");
+    PREPARE_FUNC("SpMM 1");
     sparseMatrixMult1<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
-    END_FUNC("SpMM Algorithm 1");
-    checkMatrix(memC, correctMatrix);
+    END_FUNC("SpMM 1");
 
+    /* ========================== SpMM 2 ========================== */
     gridSize = {
         N / (N_THREADS * N_THREADS) + (N % (N_THREADS * N_THREADS) > 0 ? 1 : 0),
         1, 1
     };
     blockSize = {N_THREADS * N_THREADS, 1, 1};
-    PREPARE_FUNC("SpMM Algorithm 2");
+    PREPARE_FUNC("SpMM 2");
     sparseMatrixMult2<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
-    END_FUNC("SpMM Algorithm 2");
-    checkMatrix(memC, correctMatrix);
+    END_FUNC("SpMM 2");
 
+    /* ========================== SpMM 3 ========================== */
     gridSize = {
         csrA->hdr[N] / (N_THREADS * N_THREADS) + (
             csrA->hdr[N] % (N_THREADS * N_THREADS) > 0 ? 1 : 0),
@@ -298,20 +300,18 @@ int main() {
         1
     };
     blockSize = {N_THREADS * N_THREADS, 1, 1};
-    PREPARE_FUNC("SpMM Algorithm 3");
+    PREPARE_FUNC("SpMM 3");
     sparseMatrixMult3<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
-    END_FUNC("SpMM Algorithm 3");
-    checkMatrix(memC, correctMatrix);
+    END_FUNC("SpMM 3");
 
+    /* ========================= SpMM WITH TENSORS ========================= */
     gridSize = {N / 16, N / 16, 1};
     blockSize = {32, 1, 1};
-    PREPARE_FUNC("SpMM with Tensors Algorithm");
+    PREPARE_FUNC("SpMM with Tensors");
     sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx,
-                                                   gpuBCSRData, gpuB_half, gpuC,
-                                                   N);
-    END_FUNC("SpMM with Tensors Algorithm");
-    checkMatrix(memC, correctMatrix);
+                                               gpuBCSRData, gpuB_half, gpuC, N);
+    END_FUNC("SpMM with Tensors");
 
     free(memC);
     free(correctMatrix);

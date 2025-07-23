@@ -16,7 +16,7 @@ def generate_dense_matrix(block_shape, dtype):
 
 def generate_matrix(output: str, num_rows: int, num_cols: int, sparsity: float,
                     dtype: str, heatmap: bool = False, pattern: str = 'random',
-                    blocksize: int = 32):
+                    blocksize: int = 16):
 
     matrix = np.zeros((num_rows, num_cols), dtype=dtype)
 
@@ -52,6 +52,9 @@ def generate_matrix(output: str, num_rows: int, num_cols: int, sparsity: float,
             matrix[start:end, start:end] = generate_dense_matrix(
                 block_shape,
                 dtype)
+    else:
+        print("Pattern not recognized")
+        exit(1)
 
     matrix_str = ""
 
@@ -67,7 +70,7 @@ def generate_matrix(output: str, num_rows: int, num_cols: int, sparsity: float,
     else:
         print(matrix_str)
 
-    if heatmap is not None:
+    if heatmap is not None and heatmap:
         sns.heatmap(matrix, cbar=True, cmap=plt.get_cmap('jet'))
         plt.title("Matrix heatmap")
 

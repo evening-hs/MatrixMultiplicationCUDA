@@ -16,7 +16,7 @@ project(MatrixMultiplicationCUDA LANGUAGES CXX CUDA)
 set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-add_compile_definitions(CHECK_CORRECTNESS)
+#add_compile_definitions(CHECK_CORRECTNESS)
 
 # Add executable
 add_executable(matrix_multiplication main.cu
@@ -26,6 +26,8 @@ add_executable(matrix_multiplication main.cu
         CSRMatrix.cuh
         BCSRMatrix.cu
         BCSRMatrix.cuh
+        miscutil.cpp
+        miscutil.h
 )
 
 # Set CUDA specific properties
