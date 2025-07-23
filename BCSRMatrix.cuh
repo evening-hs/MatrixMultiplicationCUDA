@@ -11,14 +11,14 @@ class BCSRMatrix {
 public:
     int *hdr = nullptr;
     int *idx = nullptr;
-    Matrix **data = nullptr;
+    half *data = nullptr;
     int blockRows = 0;
     int nonZeros = 0;
     explicit BCSRMatrix(const Matrix &matrix);
     ~BCSRMatrix();
 
     void print() const;
-    void copyToDevice(int **gpuHdr, int **gpuIdx, half ***gpuData) const;
+    void copyToDevice(int **gpuHdr, int **gpuIdx, half **gpuData) const;
 };
 
 

@@ -10,8 +10,8 @@
 
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
-string MATRIX_A_PATH = "../tests/MatrixA_8192_checkerboard.mat";
-string MATRIX_B_PATH = "../tests/MatrixA_8192_random.mat";
+string MATRIX_A_PATH = "../tests/MatrixA_4096_blockdiagonal.mat";
+string MATRIX_B_PATH = "../tests/MatrixA_4096_random.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -34,10 +34,10 @@ using std::chrono::milliseconds;
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
                         t2 = high_resolution_clock::now(); \
                         ms = duration_cast<milliseconds>(t2 - t1); \
-                        printf("%20s time (ms): %10d\n", _name, (int) ms.count()); \
-                        printf("%25s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
-                        printf("%21s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
-                        printf("%7s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
+                        printf("%30s time (ms): %10d\n", _name, (int) ms.count()); \
+                        printf("%35s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
+                        printf("%31s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
+                        printf("%17s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
 
 /**
  * Dense matrix multiplication in CPU
@@ -170,8 +170,8 @@ __global__ void sparseMatrixMult3(const int *hdr, const int *idx,
  * Multiply a BCSR matrix and a dense matrix using tensors
  */
 __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
-                                      half **data, const half *B,
-                                      float *C, const unsigned int n, const half *A) {
+                                      half *data, const half *B,
+                                      float *C, const unsigned int n) {
     const unsigned int warpRow = blockIdx.y * 16;
     const unsigned int warpCol = blockIdx.x * 16;
 
@@ -184,7 +184,7 @@ __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
     wmma::fill_fragment(c_frag, 0.0f);
 
     for (int k = hdr[warpRow / 16]; k < hdr[warpRow / 16 + 1]; k++) {
-        wmma::load_matrix_sync(a_frag, A + warpRow * n + idx[k] * 16, n);
+        wmma::load_matrix_sync(a_frag, data + idx[k] * 16 * 16, 16);
         wmma::load_matrix_sync(b_frag, B + idx[k] * 16 * n + warpCol, n);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
     }
@@ -209,7 +209,7 @@ int main(const int argc, const char **argv) {
     auto *memC = MALLOC_MATRIX(float);
     auto *correctMatrix = MALLOC_MATRIX(float);
     float *gpuC;
-    half *gpuA_half, *gpuB_half, *gpuCSRData, **gpuBCSRData;
+    half *gpuA_half, *gpuB_half, *gpuCSRData, *gpuBCSRData;
     int *gpuCSRHdr, *gpuCSRIdx, *gpuBCSRHdr, *gpuBCSRIdx;
     chrono::time_point<chrono::system_clock> t1, t2;
     auto ms = duration_cast<milliseconds>(t2 - t1);
@@ -218,7 +218,6 @@ int main(const int argc, const char **argv) {
 
     const auto *csrA = new CSRMatrix(*matrixA);
     const auto *bcsrA = new BCSRMatrix(*matrixA);
-
     bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData);
 
     cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half));
@@ -310,7 +309,7 @@ int main(const int argc, const char **argv) {
     blockSize = {32, 1, 1};
     PREPARE_FUNC("SpMM with Tensors");
     sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx,
-                                   gpuBCSRData, gpuB_half, gpuC, N, gpuA_half);
+                                   gpuBCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM with Tensors");
 
     free(memC);

@@ -3,7 +3,7 @@
 #include <fstream>
 #include <iostream>
 
-Matrix::Matrix(int rows, int cols) {
+Matrix::Matrix(const int rows, const int cols) {
     this->rows = rows;
     this->cols = cols;
     this->nonZeros = 0;

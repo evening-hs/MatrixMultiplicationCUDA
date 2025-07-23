@@ -31,7 +31,7 @@ BCSRMatrix::BCSRMatrix(const Matrix &matrix) {
     }
 
     idx = static_cast<int *>(malloc(hdr[blockRows] * sizeof(int)));
-    data = static_cast<Matrix **>(malloc(hdr[blockRows] * sizeof(Matrix*)));
+    data = static_cast<half *>(malloc(hdr[blockRows] * sizeof(half) * 16 * 16));
 
     int k = 0;
     for (int i = 0; i < matrix.rows; i += 16) {
@@ -39,13 +39,11 @@ BCSRMatrix::BCSRMatrix(const Matrix &matrix) {
             if (matrix.data[i * matrix.cols + j]) {
                 idx[k] = j / 16;
                 // obtain fragment
-                data[k] = new Matrix(16, 16);
                 for (int x = 0; x < 16; x++) {
                     for (int y = 0; y < 16; y++) {
-                        data[k]->data[x * 16 + y] = matrix.data[(i + x) * matrix.cols + j + y];
+                        data[k * 16 * 16 + x * 16 + y] = matrix.data[(i + x) * matrix.cols + j + y];
                     }
                 }
-                data[k]->nonZeros = 16 * 16;
                 nonZeros += 16 * 16;
                 k ++;
             }
@@ -76,14 +74,14 @@ void BCSRMatrix::print() const {
         for (int j = 0; j < 16; j++) {
             cout << '\t';
             for (int k = 0; k < 16; k++) {
-                cout << __half2float(data[i]->data[j * 16 + k]) << " ";
+                cout << __half2float(data[i * 16 * 16 + j * 16 + k]) << " ";
             }
             cout << '\n';
         }
     }
 }
 
-void BCSRMatrix::copyToDevice(int **gpuHdr, int **gpuIdx, half ***gpuData)
+void BCSRMatrix::copyToDevice(int **gpuHdr, int **gpuIdx, half **gpuData)
 const {
     cudaError error;
 
@@ -96,7 +94,7 @@ const {
     ASSERT_CUDA_SUCCESS;
 
     cudaMalloc(reinterpret_cast<void **>(gpuData),
-               hdr[blockRows] * sizeof(half*));
+               hdr[blockRows] * sizeof(half) * 16 * 16);
     ASSERT_CUDA_SUCCESS;
 
     cudaMemcpy(*gpuHdr, hdr, (blockRows + 1) * sizeof(int),
@@ -105,22 +103,7 @@ const {
     cudaMemcpy(*gpuIdx, idx, hdr[blockRows] * sizeof(int),
                cudaMemcpyHostToDevice);
     ASSERT_CUDA_SUCCESS;
-
-    const auto cudaPtrs = static_cast<half **>(malloc(hdr[blockRows] * sizeof(half *)));
-
-    for (int i = 0; i < hdr[blockRows]; i ++) {
-        half *tmp;
-        cudaMalloc(&tmp, 16 * 16 * sizeof(half));
-        ASSERT_CUDA_SUCCESS;
-        cudaMemcpy(tmp, data[i]->data, 16 * 16 * sizeof(half),
-            cudaMemcpyHostToDevice);
-        ASSERT_CUDA_SUCCESS;
-        cudaPtrs[i] = tmp;
-    }
-
-    cudaMemcpy(*gpuData, cudaPtrs, hdr[blockRows] * sizeof(half *),
-        cudaMemcpyHostToDevice);
+    cudaMemcpy(*gpuData, data, hdr[blockRows] * sizeof(half) * 16 * 16,
+                cudaMemcpyHostToDevice);
     ASSERT_CUDA_SUCCESS;
-
-    free(cudaPtrs);
 }
