@@ -10,8 +10,8 @@
 
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
-string MATRIX_A_PATH = "../tests/MatrixA_512_checkerboard.mat";
-string MATRIX_B_PATH = "../tests/MatrixA_512_random.mat";
+string MATRIX_A_PATH = "../tests/MatrixA_8192_checkerboard.mat";
+string MATRIX_B_PATH = "../tests/MatrixA_8192_random.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -171,7 +171,7 @@ __global__ void sparseMatrixMult3(const int *hdr, const int *idx,
  */
 __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
                                       half **data, const half *B,
-                                      float *C, const unsigned int n) {
+                                      float *C, const unsigned int n, const half *A) {
     const unsigned int warpRow = blockIdx.y * 16;
     const unsigned int warpCol = blockIdx.x * 16;
 
@@ -184,7 +184,7 @@ __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
     wmma::fill_fragment(c_frag, 0.0f);
 
     for (int k = hdr[warpRow / 16]; k < hdr[warpRow / 16 + 1]; k++) {
-        wmma::load_matrix_sync(a_frag, data[k], n);
+        wmma::load_matrix_sync(a_frag, A + warpRow * n + idx[k] * 16, n);
         wmma::load_matrix_sync(b_frag, B + idx[k] * 16 * n + warpCol, n);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
     }
@@ -310,7 +310,7 @@ int main(const int argc, const char **argv) {
     blockSize = {32, 1, 1};
     PREPARE_FUNC("SpMM with Tensors");
     sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx,
-                                               gpuBCSRData, gpuB_half, gpuC, N);
+                                   gpuBCSRData, gpuB_half, gpuC, N, gpuA_half);
     END_FUNC("SpMM with Tensors");
 
     free(memC);
