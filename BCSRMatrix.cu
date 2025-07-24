@@ -23,7 +23,7 @@ BCSRMatrix::BCSRMatrix(const Matrix &matrix) {
     for (int i = 0; i < matrix.rows; i += 16) {
         hdr[i / 16 + 1] = hdr[i / 16];
         for (int j = 0; j < matrix.cols; j += 16) {
-            if (matrix.data[i * matrix.rows + j])
+            if (matrix.data[i * matrix.cols + j])
             {
                 hdr[i / 16 + 1]++;
             }

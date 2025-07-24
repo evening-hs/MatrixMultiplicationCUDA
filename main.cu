@@ -10,8 +10,8 @@
 
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
-string MATRIX_A_PATH = "../tests/MatrixA_4096_blockdiagonal.mat";
-string MATRIX_B_PATH = "../tests/MatrixA_4096_random.mat";
+string MATRIX_A_PATH = "../tests/MatrixA_1024_checkerboard.mat";
+string MATRIX_B_PATH = "../tests/MatrixA_1024_random.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -170,7 +170,7 @@ __global__ void sparseMatrixMult3(const int *hdr, const int *idx,
  * Multiply a BCSR matrix and a dense matrix using tensors
  */
 __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
-                                      half *data, const half *B,
+                                      const half *data, const half *B,
                                       float *C, const unsigned int n) {
     const unsigned int warpRow = blockIdx.y * 16;
     const unsigned int warpCol = blockIdx.x * 16;
@@ -184,7 +184,7 @@ __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
     wmma::fill_fragment(c_frag, 0.0f);
 
     for (int k = hdr[warpRow / 16]; k < hdr[warpRow / 16 + 1]; k++) {
-        wmma::load_matrix_sync(a_frag, data + idx[k] * 16 * 16, 16);
+        wmma::load_matrix_sync(a_frag, data + k * 16 * 16, 16);
         wmma::load_matrix_sync(b_frag, B + idx[k] * 16 * n + warpCol, n);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
     }

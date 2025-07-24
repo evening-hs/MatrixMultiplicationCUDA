@@ -1,5 +1,7 @@
 
 import re
+from pathlib import Path
+
 test_results = [str(p) for p in Path('tests/').rglob("MatrixC*")]
 import pandas as pd
 
