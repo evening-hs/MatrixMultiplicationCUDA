@@ -24,17 +24,18 @@ using std::chrono::milliseconds;
 #define BYTES_SIZE(T) (N * N * sizeof(T))
 #define MALLOC_MATRIX(T) static_cast<T *>(malloc(BYTES_SIZE(T)));
 #define PREPARE_FUNC(_name) cout << "Running " << _name << "\n"; \
-                            t1 = high_resolution_clock::now(); \
                             memset(memC, 0, BYTES_SIZE(float)); \
-                            cudaMemset(gpuC, 0, BYTES_SIZE(float));
+                            cudaMemset(gpuC, 0, BYTES_SIZE(float)); \
+                            cudaEventRecord(t1, 0);
 #define END_FUNC(_name) cudaDeviceSynchronize(); \
                         error = cudaGetLastError(); \
                         if (error != cudaSuccess) \
                             cout << "CUDA error: " << cudaGetErrorString(error) << '\n'; \
+                        cudaEventRecord(t2, 0); \
+                        cudaEventSynchronize(t2); \
+                        cudaEventElapsedTime(&ms, t1, t2); \
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
-                        t2 = high_resolution_clock::now(); \
-                        ms = duration_cast<milliseconds>(t2 - t1); \
-                        printf("%30s time (ms): %10d\n", _name, (int) ms.count()); \
+                        printf("%30s time (ms): %10f\n", _name, ms); \
                         printf("%35s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
                         printf("%31s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
                         printf("%17s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
@@ -211,10 +212,12 @@ int main(const int argc, const char **argv) {
     float *gpuC;
     half *gpuA_half, *gpuB_half, *gpuCSRData, *gpuBCSRData;
     int *gpuCSRHdr, *gpuCSRIdx, *gpuBCSRHdr, *gpuBCSRIdx;
-    chrono::time_point<chrono::system_clock> t1, t2;
-    auto ms = duration_cast<milliseconds>(t2 - t1);
+    cudaEvent_t t1, t2;
+    float ms = 0.0f;
     dim3 gridSize, blockSize;
     cudaError_t error;
+    cudaEventCreate(&t1);
+    cudaEventCreate(&t2);
 
     const auto *csrA = new CSRMatrix(*matrixA);
     const auto *bcsrA = new BCSRMatrix(*matrixA);
