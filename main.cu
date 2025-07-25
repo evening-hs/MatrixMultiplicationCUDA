@@ -2,6 +2,7 @@
 #include <iostream>
 #include <chrono>
 #include <mma.h>
+#include <cublas_v2.h>
 
 #include "BCSRMatrix.cuh"
 #include "CSRMatrix.cuh"
@@ -26,6 +27,8 @@ using std::chrono::milliseconds;
 #define PREPARE_FUNC(_name) cout << "Running " << _name << "\n"; \
                             memset(memC, 0, BYTES_SIZE(float)); \
                             cudaMemset(gpuC, 0, BYTES_SIZE(float)); \
+                            cudaEventCreate(&t1); \
+                            cudaEventCreate(&t2); \
                             cudaEventRecord(t1, 0);
 #define END_FUNC(_name) cudaDeviceSynchronize(); \
                         error = cudaGetLastError(); \
@@ -35,6 +38,8 @@ using std::chrono::milliseconds;
                         cudaEventSynchronize(t2); \
                         cudaEventElapsedTime(&ms, t1, t2); \
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
+                        cudaEventDestroy(t1); \
+                        cudaEventDestroy(t2); \
                         printf("%30s time (ms): %10f\n", _name, ms); \
                         printf("%35s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
                         printf("%31s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
@@ -216,8 +221,6 @@ int main(const int argc, const char **argv) {
     float ms = 0.0f;
     dim3 gridSize, blockSize;
     cudaError_t error;
-    cudaEventCreate(&t1);
-    cudaEventCreate(&t2);
 
     const auto *csrA = new CSRMatrix(*matrixA);
     const auto *bcsrA = new BCSRMatrix(*matrixA);
@@ -314,6 +317,23 @@ int main(const int argc, const char **argv) {
     sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx,
                                    gpuBCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM with Tensors");
+
+    /* ============================== CUBLAS =============================== */
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    constexpr float alpha = 1.0;
+    constexpr float beta = 0.0;
+    const int n = static_cast<int>(N);
+
+    PREPARE_FUNC("CUBLAS");
+    cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &alpha,
+        gpuA_half, CUDA_R_16F, n,
+        gpuB_half, CUDA_R_16F, n,
+        &beta, gpuC, CUDA_R_32F, n, CUBLAS_COMPUTE_32F,
+    CUBLAS_GEMM_DEFAULT);
+    END_FUNC("CUBLAS");
+
+    cublasDestroy(handle);
 
     free(memC);
     free(correctMatrix);

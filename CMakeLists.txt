@@ -35,7 +35,7 @@ set_target_properties(matrix_multiplication PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-target_link_libraries(matrix_multiplication stdc++)
+target_link_libraries(matrix_multiplication stdc++ -lcublas -lcurand)
 
 # Set optimization flags
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
