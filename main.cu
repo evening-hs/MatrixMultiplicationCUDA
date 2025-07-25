@@ -3,6 +3,7 @@
 #include <chrono>
 #include <mma.h>
 #include <cublas_v2.h>
+#include <cusparse_v2.h>
 
 #include "BCSRMatrix.cuh"
 #include "CSRMatrix.cuh"
@@ -319,21 +320,65 @@ int main(const int argc, const char **argv) {
     END_FUNC("SpMM with Tensors");
 
     /* ============================== CUBLAS =============================== */
-    cublasHandle_t handle;
-    cublasCreate(&handle);
+    cublasHandle_t cublasHandle;
+    cublasCreate(&cublasHandle);
     constexpr float alpha = 1.0;
     constexpr float beta = 0.0;
     const int n = static_cast<int>(N);
 
-    PREPARE_FUNC("CUBLAS");
-    cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &alpha,
-        gpuA_half, CUDA_R_16F, n,
+    PREPARE_FUNC("cuBLAS GeMM");
+    cublasGemmEx(cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &alpha,
         gpuB_half, CUDA_R_16F, n,
+        gpuA_half, CUDA_R_16F, n,
         &beta, gpuC, CUDA_R_32F, n, CUBLAS_COMPUTE_32F,
     CUBLAS_GEMM_DEFAULT);
-    END_FUNC("CUBLAS");
+    END_FUNC("cuBLAS GeMM");
 
-    cublasDestroy(handle);
+    cublasDestroy(cublasHandle);
+
+    /* ============================= CUSPARSE ============================== */
+    cusparseHandle_t cusparseHandle;
+    size_t bufferSize;
+    void *gpuBuffer = nullptr;
+    cusparseMatDescr_t cusparseMatDescr;
+    cusparseSpMatDescr_t matDescrA;
+    cusparseDnMatDescr_t matDescrB, matDescrC;
+    int64_t rows, cols, ld;
+    cudaDataType_t dataType;
+    cusparseOrder_t order;
+
+    cusparseCreate(&cusparseHandle);
+
+    cusparseCreateMatDescr(&cusparseMatDescr);
+    cusparseSetMatType(cusparseMatDescr, CUSPARSE_MATRIX_TYPE_GENERAL);
+    cusparseSetMatIndexBase(cusparseMatDescr, CUSPARSE_INDEX_BASE_ZERO);
+
+    cusparseCreateCsr(&matDescrA, n, n, csrA->hdr[N],
+        gpuCSRHdr, gpuCSRIdx, gpuCSRData,
+        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_16F);
+    cusparseCreateDnMat(&matDescrB, n, n, n, gpuB_half,
+        CUDA_R_16F, CUSPARSE_ORDER_COL);
+    cusparseCreateDnMat(&matDescrC, n, n, n, gpuC,
+        CUDA_R_32F, CUSPARSE_ORDER_COL);
+
+    cusparseSpMM_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matDescrA, matDescrB,
+        &beta, matDescrC, CUDA_R_32F, CUSPARSE_SPMM_ALG_DEFAULT, &bufferSize);
+    cudaMalloc(&gpuBuffer, bufferSize);
+
+    PREPARE_FUNC("cuSPARSE CSR");
+    cusparseSpMM(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matDescrA, matDescrB, &beta,
+        matDescrC, CUDA_R_32F, CUSPARSE_SPMM_ALG_DEFAULT, gpuBuffer);
+    cusparseDnMatGet(matDescrC, &rows, &cols, &ld,
+        reinterpret_cast<void **>(&gpuC), &dataType, &order);
+    END_FUNC("cuSPARSE CSR");
+
+    cusparseDestroySpMat(matDescrA);
+    cusparseDestroyDnMat(matDescrB);
+    cusparseDestroyDnMat(matDescrC);
+    cusparseDestroy(cusparseHandle);
 
     free(memC);
     free(correctMatrix);
