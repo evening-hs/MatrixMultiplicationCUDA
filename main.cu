@@ -23,6 +23,10 @@ using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
 using std::chrono::milliseconds;
 
+#define CHECK_CUDA_ERRORS \
+    error = cudaGetLastError(); \
+    if (error != cudaSuccess) \
+        cout << "CUDA error: " << cudaGetErrorString(error) << '\n';
 #define BYTES_SIZE(T) (N * N * sizeof(T))
 #define MALLOC_MATRIX(T) static_cast<T *>(malloc(BYTES_SIZE(T)));
 #define PREPARE_FUNC(_name) cout << "Running " << _name << "\n"; \
@@ -360,17 +364,23 @@ int main(const int argc, const char **argv) {
     cusparseCreateDnMat(&matDescrB, n, n, n, gpuB_half,
         CUDA_R_16F, CUSPARSE_ORDER_COL);
     cusparseCreateDnMat(&matDescrC, n, n, n, gpuC,
-        CUDA_R_32F, CUSPARSE_ORDER_COL);
+        CUDA_R_32F, CUSPARSE_ORDER_ROW);
 
-    cusparseSpMM_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matDescrA, matDescrB,
-        &beta, matDescrC, CUDA_R_32F, CUSPARSE_SPMM_ALG_DEFAULT, &bufferSize);
+    cusparseSpMM_bufferSize(cusparseHandle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_TRANSPOSE,
+        &alpha, matDescrA, matDescrB,
+        &beta, matDescrC, CUDA_R_32F,
+        CUSPARSE_SPMM_ALG_DEFAULT, &bufferSize);
     cudaMalloc(&gpuBuffer, bufferSize);
 
     PREPARE_FUNC("cuSPARSE CSR");
-    cusparseSpMM(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matDescrA, matDescrB, &beta,
-        matDescrC, CUDA_R_32F, CUSPARSE_SPMM_ALG_DEFAULT, gpuBuffer);
+    cusparseSpMM(cusparseHandle,
+        CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_TRANSPOSE,
+        &alpha, matDescrA, matDescrB, &beta,
+        matDescrC,CUDA_R_32F,
+        CUSPARSE_SPMM_ALG_DEFAULT, gpuBuffer);
     cusparseDnMatGet(matDescrC, &rows, &cols, &ld,
         reinterpret_cast<void **>(&gpuC), &dataType, &order);
     END_FUNC("cuSPARSE CSR");
