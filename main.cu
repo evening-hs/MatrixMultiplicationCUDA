@@ -12,8 +12,8 @@
 
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
-string MATRIX_A_PATH = "../tests/MatrixA_1024_checkerboard.mat";
-string MATRIX_B_PATH = "../tests/MatrixA_1024_random.mat";
+string MATRIX_A_PATH = "../tests/MatrixA_4096_checkerboard.mat";
+string MATRIX_B_PATH = "../tests/MatrixA_4096_random.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -35,13 +35,14 @@ using std::chrono::milliseconds;
                             cudaEventCreate(&t1); \
                             cudaEventCreate(&t2); \
                             cudaEventRecord(t1, 0);
-#define END_FUNC(_name) cudaDeviceSynchronize(); \
+#define END_FUNC(_name, ...) cudaDeviceSynchronize(); \
                         error = cudaGetLastError(); \
                         if (error != cudaSuccess) \
                             cout << "CUDA error: " << cudaGetErrorString(error) << '\n'; \
                         cudaEventRecord(t2, 0); \
                         cudaEventSynchronize(t2); \
                         cudaEventElapsedTime(&ms, t1, t2); \
+                        __VA_ARGS__ \
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
                         cudaEventDestroy(t1); \
                         cudaEventDestroy(t2); \
@@ -381,9 +382,8 @@ int main(const int argc, const char **argv) {
         &alpha, matDescrA, matDescrB, &beta,
         matDescrC,CUDA_R_32F,
         CUSPARSE_SPMM_ALG_DEFAULT, gpuBuffer);
-    cusparseDnMatGet(matDescrC, &rows, &cols, &ld,
-        reinterpret_cast<void **>(&gpuC), &dataType, &order);
-    END_FUNC("cuSPARSE CSR");
+    END_FUNC("cuSPARSE CSR",
+        cusparseDnMatGet(matDescrC, &rows, &cols, &ld, reinterpret_cast<void **>(&gpuC), &dataType, &order););
 
     cusparseDestroySpMat(matDescrA);
     cusparseDestroyDnMat(matDescrB);
