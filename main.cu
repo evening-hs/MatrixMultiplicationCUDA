@@ -12,8 +12,8 @@
 
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
-string MATRIX_A_PATH = "../tests/MatrixA_4096_checkerboard.mat";
-string MATRIX_B_PATH = "../tests/MatrixA_4096_random.mat";
+string MATRIX_A_PATH = "../tests/MatrixA_2048_checkerboard.mat";
+string MATRIX_B_PATH = "../tests/MatrixA_2048_random.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -23,6 +23,7 @@ using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
 using std::chrono::milliseconds;
 
+#define BLOCKSIZE 32
 #define CHECK_CUDA_ERRORS \
     error = cudaGetLastError(); \
     if (error != cudaSuccess) \
@@ -89,6 +90,26 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
     }
 }
 
+/**
+ * Dense matrix multiplication in GPU with memory coalescence
+ * // O(n) per thread
+ */
+__global__ void denseMatrixMul1(const half *d_A, const half *d_B, float *d_C,
+                               const unsigned int n) {
+    const unsigned int colIdx = blockIdx.y * N_THREADS + (threadIdx.x % N_THREADS);
+    const unsigned int rowIdx = blockIdx.x * N_THREADS + (threadIdx.x / N_THREADS);
+
+    if (rowIdx < n && colIdx < n) {
+        float tmp = 0.0f;
+        for (int k = 0; k < n; k++) {
+            // Accumulate results for a single element
+            // There's no need here to use reduction  or atomic add, because this
+            // thread is the only one accessing this location
+            tmp += __half2float(d_A[rowIdx * n + k]) * __half2float(d_B[k * n + colIdx]);
+        }
+        d_C[rowIdx * n + colIdx] = tmp;
+    }
+}
 /**
  * Multiply two dense matrices using tensors wmma
  */
@@ -271,6 +292,17 @@ int main(const int argc, const char **argv) {
     END_FUNC("Dense on GPU");
     // Use dense on GPU as correct function
     memcpy(correctMatrix, memC, N * N * sizeof(float));
+
+    /* ======================== DENSE ON GPU CO ========================= */
+    gridSize = {
+        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+        1
+    };
+    blockSize = {N_THREADS * N_THREADS, 1, 1};
+    PREPARE_FUNC("Dense on GPU Co");
+    denseMatrixMul1<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
+    END_FUNC("Dense on GPU Co");
 
     /* ========================== DENSE WMMA ========================== */
     gridSize = {N / 16, N / 16, 1};
