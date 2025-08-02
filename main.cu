@@ -24,6 +24,7 @@ using std::chrono::high_resolution_clock;
 using std::chrono::milliseconds;
 
 #define BLOCKSIZE 32
+#define CEIL_DIV(_a, _b) ((_a) / (_b) + ((_a) % (_b) > 0 ? 1 : 0))
 #define CHECK_CUDA_ERRORS \
     error = cudaGetLastError(); \
     if (error != cudaSuccess) \
@@ -47,10 +48,10 @@ using std::chrono::milliseconds;
                         cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
                         cudaEventDestroy(t1); \
                         cudaEventDestroy(t2); \
-                        printf("%30s time (ms): %10f\n", _name, ms); \
-                        printf("%35s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
-                        printf("%31s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
-                        printf("%17s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
+                        printf("%40s time (ms): %10f\n", _name, ms); \
+                        printf("%45s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
+                        printf("%41s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
+                        printf("%27s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
 
 /**
  * Dense matrix multiplication in CPU
@@ -80,13 +81,15 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
     const unsigned int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (rowIdx < n && colIdx < n) {
+        float tmp = 0.0f;
         for (int k = 0; k < n; k++) {
             // Accumulate results for a single element
             // There's no need here to use reduction  or atomic add, because this
             // thread is the only one accessing this location
-            d_C[rowIdx * n + colIdx] += __half2float(d_A[rowIdx * n + k]) *
+            tmp += __half2float(d_A[rowIdx * n + k]) *
                     __half2float(d_B[k * n + colIdx]);
         }
+        d_C[rowIdx * n + colIdx] = tmp;
     }
 }
 
@@ -94,22 +97,21 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
  * Dense matrix multiplication in GPU with memory coalescence
  * // O(n) per thread
  */
-__global__ void denseMatrixMul1(const half *d_A, const half *d_B, float *d_C,
+__global__ void denseMatrixMulCo(const half *d_A, const half *d_B, float *d_C,
                                const unsigned int n) {
-    const unsigned int colIdx = blockIdx.y * N_THREADS + (threadIdx.x % N_THREADS);
-    const unsigned int rowIdx = blockIdx.x * N_THREADS + (threadIdx.x / N_THREADS);
+    const unsigned int globalThreadIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int rowIdx = blockIdx.y * (blockDim.x / n) + (globalThreadIdx / n);
+    const unsigned int colIdx = globalThreadIdx % n;
 
     if (rowIdx < n && colIdx < n) {
         float tmp = 0.0f;
         for (int k = 0; k < n; k++) {
-            // Accumulate results for a single element
-            // There's no need here to use reduction  or atomic add, because this
-            // thread is the only one accessing this location
             tmp += __half2float(d_A[rowIdx * n + k]) * __half2float(d_B[k * n + colIdx]);
         }
         d_C[rowIdx * n + colIdx] = tmp;
     }
 }
+
 /**
  * Multiply two dense matrices using tensors wmma
  */
@@ -153,10 +155,12 @@ __global__ void sparseMatrixMult1(const int *hdr, const int *idx,
     const unsigned int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
     if (rowIdx < n && colIdx < n) {
+        float tmp = 0.0f;
         for (int k = hdr[rowIdx]; k < hdr[rowIdx + 1]; k++) {
-            C[rowIdx * n + colIdx] += __half2float(data[k]) * __half2float(
+            tmp += __half2float(data[k]) * __half2float(
                 B[idx[k] * n + colIdx]);
         }
+        C[rowIdx * n + colIdx] = tmp;
     }
 }
 
@@ -293,16 +297,16 @@ int main(const int argc, const char **argv) {
     // Use dense on GPU as correct function
     memcpy(correctMatrix, memC, N * N * sizeof(float));
 
-    /* ======================== DENSE ON GPU CO ========================= */
+    /* ================= DENSE ON GPU WITH COALESCENCE ================== */
     gridSize = {
-        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
-        N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+        CEIL_DIV(N, (N_THREADS * N_THREADS)),
+        CEIL_DIV(N, CEIL_DIV(N_THREADS * N_THREADS, N)),
         1
     };
     blockSize = {N_THREADS * N_THREADS, 1, 1};
-    PREPARE_FUNC("Dense on GPU Co");
-    denseMatrixMul1<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
-    END_FUNC("Dense on GPU Co");
+    PREPARE_FUNC("Dense on GPU Coalescence");
+    denseMatrixMulCo<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
+    END_FUNC("Dense on GPU Coalescence");
 
     /* ========================== DENSE WMMA ========================== */
     gridSize = {N / 16, N / 16, 1};
