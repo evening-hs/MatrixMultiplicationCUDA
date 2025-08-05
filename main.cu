@@ -4,6 +4,9 @@
 #include <mma.h>
 #include <cublas_v2.h>
 #include <cusparse_v2.h>
+#include <cooperative_groups.h>
+#include <cuda/barrier>
+#include <utility>
 
 #include "BCSRMatrix.cuh"
 #include "CSRMatrix.cuh"
@@ -14,6 +17,18 @@ unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
 string MATRIX_A_PATH = "../tests/MatrixA_2048_checkerboard.mat";
 string MATRIX_B_PATH = "../tests/MatrixA_2048_random.mat";
+
+const unsigned int dmm_numThreads = 256;
+const unsigned int dmm_warpSize = 32;
+const unsigned int bn = 256;
+const unsigned int bm = 128;
+const unsigned int bk = 16;
+const unsigned int wn = 32;
+const unsigned int wm = 128;
+const unsigned int wniter = 1;
+const unsigned int tn = 8;
+const unsigned int tm = 8;
+constexpr unsigned int num_warps = dmm_numThreads / 32;
 
 using namespace std;
 using namespace nvcuda;
@@ -108,6 +123,139 @@ __global__ void denseMatrixMulCo(const half *d_A, const half *d_B, float *d_C,
             tmp += __half2float(d_A[rowIdx * n + k]) * __half2float(d_B[k * n + colIdx]);
         }
         d_C[rowIdx * n + colIdx] = tmp;
+    }
+}
+
+__device__ void denseMatrixMul_loadFromGmem(const unsigned int n,
+    const half *d_A, half *d_B, half *As, half *Bs, int innerRowA, int innerColA,
+    int innerRowB, int innerColB,
+    cuda::barrier<cuda::thread_scope::thread_scope_block> barrier,
+    const int rowStrideA, const int rowStrideB) {
+    for (unsigned int offset = 0; offset + rowStrideA < bm; offset += rowStrideA) {
+        cuda::memcpy_async(&As[innerColA * 4 * bm + innerRowA + offset],
+            &d_A[(innerRowA + offset) * n + innerColA * 4],
+            cuda::aligned_size_t<sizeof(half)>(sizeof(half)),
+            barrier);
+        cuda::memcpy_async(&As[(innerColA * 4 + 1) * bm + innerRowA + offset],
+            &d_A[(innerRowA + offset) * n + innerColA * 4 + 1],
+            cuda::aligned_size_t<sizeof(half)>(sizeof(half)),
+            barrier);
+        cuda::memcpy_async(&As[(innerColA * 4 + 2) * bm + innerRowA + offset],
+            &d_A[(innerRowA + offset) * n + innerColA * 4 + 2],
+            cuda::aligned_size_t<sizeof(half)>(sizeof(half)),
+            barrier);
+        cuda::memcpy_async(&As[(innerColA * 4 + 3) * bm + innerRowA + offset],
+            &d_A[(innerRowA + offset) * n + innerColA * 4 + 3],
+            cuda::aligned_size_t<sizeof(half)>(sizeof(half)),
+            barrier);
+    }
+
+    for (unsigned int offset = 0; offset + rowStrideB < bk; offset += rowStrideB) {
+        cuda::memcpy_async(&Bs[(innerRowB + offset) * bn + innerColB * 4],
+            &d_B[(innerRowB + offset) * n + innerColB * 4],
+            cuda::aligned_size_t<sizeof(float4)>(sizeof(float4)), barrier);
+    }
+}
+
+/**
+ * Dense matrix multiplication in GPU with memory coalescence
+ * // O(n) per thread
+ */
+__global__ void denseMatrixMulImp(half *d_A, half *d_B, float *d_C,
+                               const unsigned int n) {
+    auto block = cooperative_groups::this_thread_block();
+    __shared__ cuda::barrier<cuda::thread_scope::thread_scope_block> frontBarrier;
+    __shared__ cuda::barrier<cuda::thread_scope::thread_scope_block> backBarrier;
+    auto frontBarrierPtr = &frontBarrier;
+    auto backBarrierPtr = &backBarrier;
+
+    if (block.thread_rank() == 0) {
+        init(frontBarrierPtr, block.size());
+        init(backBarrierPtr, block.size());
+    }
+
+    __syncthreads();
+
+    const unsigned int numRow = blockIdx.y;
+    const unsigned int numCol = blockIdx.x;
+
+    const unsigned int warpIdx = threadIdx.x / dmm_warpSize;
+    const unsigned int warpCol = warpIdx % (bn / wn);
+    const unsigned int warpRow = warpIdx / (bn / wn);
+
+    constexpr unsigned int wmiter = (wm / wn) / (dmm_warpSize * tm & tn * wniter);
+    constexpr unsigned int wsubm = wm / wmiter;
+    constexpr unsigned int wsubn = wn / wniter;
+
+    const unsigned int threadIdxInWarp = threadIdx.x % dmm_warpSize;
+    const unsigned int threadColInWarp = threadIdxInWarp % (wsubn / tn);
+    const unsigned int threadRowInWarp = threadIdxInWarp / (wsubn / tn);
+
+    __shared__ half As[2 * bm * bk];
+    __shared__ half Bs[2 * bk * bn];
+
+    d_A += numRow * bm * n;
+    d_B += numCol * bn;
+
+    d_C += (numRow * bn + warpRow * wm) * N + numCol * bn + warpCol * wn;
+
+    const unsigned int innerRowA = threadIdx.x / (bk / 4);
+    const unsigned int innerColA = threadIdxInWarp % (bk / 4);
+    constexpr unsigned int rowStrideA = (dmm_numThreads * 4) / bk;
+    const unsigned int innerRowB = threadIdx.x / (bn / 4);
+    const unsigned int innerColB = threadIdx.x % (bn / 4);
+    constexpr unsigned int rowStrideB = dmm_numThreads / (bn / 4);
+
+    float threadResults[wmiter * tm * wniter * tn] = {0.0f};
+    float regM[wmiter * tm] = {0.0f};
+    float regN[wniter * tn] = {0.0f};
+
+    int As_offset = 0;
+    int Bs_offset = 0;
+
+    // TODO load from gmem
+
+    for (unsigned int blockIdx = 0; blockIdx < n - bk; blockIdx += bk) {
+        // TODO load from gmem
+        (*frontBarrierPtr).arrive_and_wait();
+        // TODO process from Smem
+
+        d_A += bk;
+        d_B += bk * n;
+
+        As_offset = 1 - As_offset;
+        Bs_offset = 1 - Bs_offset;
+
+        std::swap(frontBarrierPtr, backBarrierPtr);
+
+        __syncthreads();
+    }
+
+    (*frontBarrierPtr).arrive_and_wait();
+    // TODO process from smem
+
+    for (unsigned int wSubRowIdx = 0; wSubRowIdx < wmiter; wSubRowIdx++) {
+        for (unsigned int wSubColIdx = 0; wSubColIdx < wniter; wSubColIdx++) {
+            float *C_tmpPtr = d_C + wSubRowIdx * wsubm * n + wSubColIdx * wsubn;
+            for (unsigned int resIdxM = 0; resIdxM < tm; resIdxM++) {
+                for (unsigned int resIdxN = 0; resIdxN < tn; resIdxN += 4) {
+                    float4 tmp = reinterpret_cast<float4 *>(
+                        &C_tmpPtr[(threadRowInWarp * tm + resIdxM) * n
+                            + threadColInWarp * tn + resIdxN])[0];
+                    const unsigned int idx = (wSubRowIdx * tm + resIdxM)
+                        * (wniter * tn)
+                        + wSubColIdx * tn + resIdxN;
+                    tmp.x = threadResults[idx];
+                    tmp.y = threadResults[idx + 1];
+                    tmp.z = threadResults[idx + 2];
+                    tmp.w = threadResults[idx + 3];
+
+                    reinterpret_cast<float4 *>(
+                        &C_tmpPtr[(threadRowInWarp * tm + resIdxM) * n
+                            + threadColInWarp * tn + resIdxN])[0] = tmp;
+                }
+            }
+        }
     }
 }
 
@@ -303,11 +451,20 @@ int main(const int argc, const char **argv) {
         1
     };
     blockSize = {N_THREADS * N_THREADS, 1, 1};
-    cout << "grid " << gridSize.x << ' ' << gridSize.y << endl;
-    cout << "block " << blockSize.x << ' ' << blockSize.y << endl;
     PREPARE_FUNC("Dense on GPU Coalescence");
     denseMatrixMulCo<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
     END_FUNC("Dense on GPU Coalescence");
+
+    /* ================= DENSE ON GPU IMPROVED ================== */
+    gridSize = {
+        CEIL_DIV(N, 256),
+        CEIL_DIV(N, 128),
+        1
+    };
+    blockSize = {256, 1, 1};
+    PREPARE_FUNC("Dense on GPU Improved");
+    denseMatrixMulImp<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
+    END_FUNC("Dense on GPU Improved");
 
     /* ========================== DENSE WMMA ========================== */
     gridSize = {N / 16, N / 16, 1};
