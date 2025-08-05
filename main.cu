@@ -99,9 +99,8 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
  */
 __global__ void denseMatrixMulCo(const half *d_A, const half *d_B, float *d_C,
                                const unsigned int n) {
-    const unsigned int globalThreadIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    const unsigned int rowIdx = blockIdx.y * (blockDim.x / n) + (globalThreadIdx / n);
-    const unsigned int colIdx = globalThreadIdx % n;
+    const unsigned int rowIdx = blockIdx.y * CEIL_DIV(n, gridDim.y) + threadIdx.x / n;
+    const unsigned int colIdx = blockIdx.x * blockDim.x + threadIdx.x % n;
 
     if (rowIdx < n && colIdx < n) {
         float tmp = 0.0f;
@@ -304,6 +303,8 @@ int main(const int argc, const char **argv) {
         1
     };
     blockSize = {N_THREADS * N_THREADS, 1, 1};
+    cout << "grid " << gridSize.x << ' ' << gridSize.y << endl;
+    cout << "block " << blockSize.x << ' ' << blockSize.y << endl;
     PREPARE_FUNC("Dense on GPU Coalescence");
     denseMatrixMulCo<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
     END_FUNC("Dense on GPU Coalescence");
