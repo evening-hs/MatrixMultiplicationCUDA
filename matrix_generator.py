@@ -20,6 +20,18 @@ def generate_matrix(output: str, num_rows: int, num_cols: int, sparsity: float,
 
     matrix = np.zeros((num_rows, num_cols), dtype=dtype)
 
+    def fill_block(block_i, block_j):
+        # fill the matrix from i to i + blocksize and j to j + blocksize
+        start_row = block_i * blocksize
+        start_col = block_j * blocksize
+        end_row = min(start_row + blocksize, num_rows)
+        end_col = min(start_col + blocksize, num_cols)
+
+        block_shape = (end_row - start_row, end_col - start_col)
+
+        matrix[start_row:end_row, start_col:end_col] = generate_dense_matrix(
+            block_shape, dtype)
+
     if pattern == 'random':
         matrix = sparse.random(num_rows, num_cols, (1.0 - sparsity),
                                dtype=dtype if dtype != 'float16' else 'float32'
@@ -28,30 +40,26 @@ def generate_matrix(output: str, num_rows: int, num_cols: int, sparsity: float,
         for i in range(num_rows // blocksize + 1):
             for j in range(num_cols // blocksize + 1):
                 if i % 2 ^ j % 2 == 0:
-                    # fill the matrix from i to i + blocksize and j to j + blocksize
-                    start_row = i * blocksize
-                    start_col = j * blocksize
-                    end_row = min(start_row + blocksize, num_rows)
-                    end_col = min(start_col + blocksize, num_cols)
-
-                    block_shape = (end_row - start_row, end_col - start_col)
-
-                    matrix[start_row:end_row, start_col:end_col] = generate_dense_matrix(block_shape, dtype)
+                    fill_block(i, j)
 
     elif pattern == 'diagonal':
         for i in range(min(num_rows, num_cols)):
             matrix[i:i+1, i:i+1] = generate_dense_matrix((1,1), dtype)
-        pass
+
     elif pattern == 'blockdiagonal':
         for i in range(min(num_rows, num_cols) // blocksize + 1):
-            start = i * blocksize
-            end = min(start + blocksize, num_rows)
+            fill_block(i, i)
 
-            block_shape = (end - start, end - start)
+    elif pattern == 'blockrandom':
+        mask = sparse.random(num_rows // blocksize + 1,
+                             num_cols // blocksize + 1,
+                             (1.0 - sparsity), dtype='int32').toarray()
+        for i in range(num_rows // blocksize + 1):
+            for j in range(num_cols // blocksize + 1):
+                if mask[i][j] != 0:
+                    fill_block(i, j)
 
-            matrix[start:end, start:end] = generate_dense_matrix(
-                block_shape,
-                dtype)
+
     else:
         print("Pattern not recognized")
         exit(1)
@@ -102,7 +110,8 @@ def main():
                         help='Generate the matrix heatmap')
     parser.add_argument('-p', '--pattern', default='random',
                         choices=['random', 'checkerboard', 'diagonal',
-                                 'blockdiagonal', 'r', 'c', 'd', 'b'],
+                                 'blockdiagonal', 'blockrandom',
+                                 'r', 'c', 'd', 'D', 'R'],
                         help='Pattern used to fill the matrix')
     parser.add_argument('-b', '--blocksize', default=32, type=int,
                         help='Blocksize of the matrix')
@@ -117,8 +126,10 @@ def main():
         args.pattern = 'checkerboard'
     elif args.pattern == 'd':
         args.pattern = 'diagonal'
-    elif args.pattern == 'b':
+    elif args.pattern == 'D':
         args.pattern = 'blockdiagnonal'
+    elif args.pattern == 'R':
+        args.pattern = 'blockrandom'
 
     generate_matrix(args.output, args.nrows, args.ncols, args.sparsity,
                     args.type, args.heatmap, args.pattern, args.blocksize,)
