@@ -33,27 +33,48 @@ using std::chrono::milliseconds;
         cout << "CUDA error: " << cudaGetErrorString(error) << '\n';
 #define BYTES_SIZE(T) (N * N * sizeof(T))
 #define MALLOC_MATRIX(T) static_cast<T *>(malloc(BYTES_SIZE(T)));
-#define PREPARE_FUNC(_name) cout << "Running " << _name << "\n"; \
-                            memset(memC, 0, BYTES_SIZE(float)); \
-                            cudaMemset(gpuC, 0, BYTES_SIZE(float)); \
-                            cudaEventCreate(&t1); \
-                            cudaEventCreate(&t2); \
-                            cudaEventRecord(t1, 0);
-#define END_FUNC(_name, ...) cudaDeviceSynchronize(); \
-                        error = cudaGetLastError(); \
-                        if (error != cudaSuccess) \
-                            cout << "CUDA error: " << cudaGetErrorString(error) << '\n'; \
-                        cudaEventRecord(t2, 0); \
-                        cudaEventSynchronize(t2); \
-                        cudaEventElapsedTime(&ms, t1, t2); \
-                        __VA_ARGS__ \
-                        cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
-                        cudaEventDestroy(t1); \
-                        cudaEventDestroy(t2); \
-                        printf("%40s time (ms): %10f\n", _name, ms); \
-                        printf("%45s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
-                        printf("%41s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
-                        printf("%27s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
+#define ALLOC_GPU_MEM \
+    cudaDeviceReset(); \
+    bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData); \
+    cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half)); \
+    cudaMalloc(reinterpret_cast<void **>(&gpuB_half), BYTES_SIZE(half)); \
+    cudaMalloc(reinterpret_cast<void **>(&gpuC), BYTES_SIZE(float)); \
+    cudaMalloc(reinterpret_cast<void **>(&gpuCSRData), \
+    csrA->hdr[N] * sizeof(half)); \
+    cudaMalloc(reinterpret_cast<void **>(&gpuCSRHdr), (N + 1) * sizeof(int)); \
+    cudaMalloc(reinterpret_cast<void **>(&gpuCSRIdx), \
+               csrA->hdr[N] * sizeof(int)); \
+    cudaMemcpy(gpuA_half, matrixA->data, BYTES_SIZE(half), \
+               cudaMemcpyHostToDevice); \
+    cudaMemcpy(gpuB_half, matrixB->data, BYTES_SIZE(half), \
+               cudaMemcpyHostToDevice); \
+    cudaMemcpy(gpuCSRData, csrA->data, csrA->hdr[N] * sizeof(half), \
+               cudaMemcpyHostToDevice); \
+    cudaMemcpy(gpuCSRHdr, csrA->hdr, (N + 1) * sizeof(int), \
+    cudaMemcpyHostToDevice); \
+    cudaMemcpy(gpuCSRIdx, csrA->idx, csrA->hdr[N] * sizeof(int), \
+               cudaMemcpyHostToDevice);
+#define PREPARE_FUNC(_name) \
+    cout << "Running " << _name << "\n"; \
+    memset(memC, 0, BYTES_SIZE(float)); \
+    cudaMemset(gpuC, 0, BYTES_SIZE(float)); \
+    cudaEventCreate(&t1); \
+    cudaEventCreate(&t2); \
+    cudaEventRecord(t1, 0);
+#define END_FUNC(_name, ...) \
+    cudaDeviceSynchronize(); \
+    CHECK_CUDA_ERRORS \
+    cudaEventRecord(t2, 0); \
+    cudaEventSynchronize(t2); \
+    cudaEventElapsedTime(&ms, t1, t2); \
+    __VA_ARGS__ \
+    cudaMemcpy(memC, gpuC, BYTES_SIZE(float), cudaMemcpyDeviceToHost); \
+    cudaEventDestroy(t1); \
+    cudaEventDestroy(t2); \
+    printf("%40s time (ms): %10f\n", _name, ms); \
+    printf("%45s rmse: %10lf\n", _name, rmse(memC, correctMatrix, N)); \
+    printf("%41s max diff: %10lf\n", _name, maxdiff(memC, correctMatrix, N)); \
+    printf("%27s average relative error: %10lf\n", _name, avgrelerr(memC, correctMatrix, N));
 
 /**
  * Dense matrix multiplication in CPU
@@ -100,14 +121,16 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
  * // O(n) per thread
  */
 __global__ void denseMatrixMulCo(const half *d_A, const half *d_B, float *d_C,
-                               const unsigned int n) {
-    const unsigned int rowIdx = blockIdx.y * CEIL_DIV(n, gridDim.y) + threadIdx.x / n;
+                                 const unsigned int n) {
+    const unsigned int rowIdx = blockIdx.y * CEIL_DIV(n, gridDim.y) + threadIdx.
+                                x / n;
     const unsigned int colIdx = blockIdx.x * blockDim.x + threadIdx.x % n;
 
     if (rowIdx < n && colIdx < n) {
         float tmp = 0.0f;
         for (int k = 0; k < n; k++) {
-            tmp += __half2float(d_A[rowIdx * n + k]) * __half2float(d_B[k * n + colIdx]);
+            tmp += __half2float(d_A[rowIdx * n + k]) * __half2float(
+                d_B[k * n + colIdx]);
         }
         d_C[rowIdx * n + colIdx] = tmp;
     }
@@ -149,8 +172,8 @@ __global__ void denseMatrixMulTensor(const half *d_A, const half *d_B,
  * O(R) R = non zeroes in this row
  */
 __global__ void sparseMatrixMult1Co(const int *hdr, const int *idx,
-                                  const half *data, const half *B, float *C,
-                                  const unsigned int n) {
+                                    const half *data, const half *B, float *C,
+                                    const unsigned int n) {
     const unsigned int rowIdx = blockDim.y * blockIdx.y + threadIdx.y;
     const unsigned int colIdx = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -226,6 +249,100 @@ __global__ void sparseMatrixMult3(const int *hdr, const int *idx,
 /**
  * Multiply a BCSR matrix and a dense matrix using tensors
  */
+__global__ void sparseMatrixMulTensor1(const int *hdr, const int *idx,
+                                      const half *data, const half *B,
+                                      float *C, const unsigned int n) {
+        const unsigned int warpRow = blockIdx.y * 16;
+    const unsigned int warpCol = blockIdx.x * 16;
+
+    if (warpRow >= n || warpCol >= n) return;
+
+    // Double buffering for B matrix tiles
+    __shared__ half B_shared[2][16 * 16];
+    __shared__ int idx_cache[32];
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
+
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    const unsigned int row_start = hdr[warpRow / 16];
+    const unsigned int row_end = hdr[warpRow / 16 + 1];
+    const unsigned nnz_in_row = row_end - row_start;
+
+    const unsigned int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    const unsigned int total_threads = blockDim.x * blockDim.y;
+
+    // Load indices
+    for (unsigned int i = tid; i < nnz_in_row; i += total_threads) {
+        if (row_start + i < row_end) {
+            idx_cache[i] = idx[row_start + i];
+        }
+    }
+    __syncthreads();
+
+    int buffer_idx = 0;
+    int last_loaded_col = -1;
+
+    // Prefetch first B tile if we have any work
+    if (nnz_in_row > 0) {
+        const int first_col = idx_cache[0];
+        if (first_col != last_loaded_col) {
+            const half *B_tile = B + first_col * 16 * n + warpCol;
+            for (unsigned int i = tid; i < 256; i += total_threads) {
+                const unsigned int local_row = i / 16;
+                const unsigned int local_col = i % 16;
+                if (first_col * 16 + local_row < n && warpCol + local_col < n) {
+                    B_shared[buffer_idx][local_row * 16 + local_col] = B_tile[local_row * n + local_col];
+                } else {
+                    B_shared[buffer_idx][local_row * 16 + local_col] = __float2half(0.0f);
+                }
+            }
+            last_loaded_col = first_col;
+        }
+        __syncthreads();
+    }
+
+    for (int k = 0; k < nnz_in_row; k++) {
+        wmma::load_matrix_sync(a_frag, data + (row_start + k) * 16 * 16, 16);
+
+        if (k + 1 < nnz_in_row) {
+            const int next_col = idx_cache[k + 1];
+            const int next_buffer_idx = 1 - buffer_idx;
+
+            if (next_col != last_loaded_col) {
+                const half *B_tile = B + next_col * 16 * n + warpCol;
+                for (int unsigned i = tid; i < 256; i += total_threads) {
+                    const unsigned int local_row = i / 16;
+                    const unsigned int local_col = i % 16;
+                    if (next_col * 16 + local_row < n && warpCol + local_col < n) {
+                        B_shared[next_buffer_idx][local_row * 16 + local_col] = B_tile[local_row * n + local_col];
+                    } else {
+                        B_shared[next_buffer_idx][local_row * 16 + local_col] = __float2half(0.0f);
+                    }
+                }
+            }
+        }
+
+        wmma::load_matrix_sync(b_frag, B_shared[buffer_idx], 16);
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+
+        __syncthreads();
+
+        if (k + 1 < nnz_in_row && idx_cache[k + 1] != last_loaded_col) {
+            buffer_idx = 1 - buffer_idx;
+            last_loaded_col = idx_cache[k + 1];
+        }
+    }
+
+    wmma::store_matrix_sync(C + warpRow * n + warpCol, c_frag, n,
+                            wmma::mem_row_major);
+}
+
+/**
+ * Multiply a BCSR matrix and a dense matrix using tensors
+ */
 __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
                                       const half *data, const half *B,
                                       float *C, const unsigned int n) {
@@ -263,6 +380,11 @@ int main(const int argc, const char **argv) {
     assert(matrixA->cols == matrixB->rows);
     N = matrixA->cols;
 
+    cublasHandle_t cublasHandle;
+    constexpr float alpha = 1.0;
+    constexpr float beta = 0.0;
+    const int n = static_cast<int>(N);
+
     auto *memC = MALLOC_MATRIX(float);
     auto *correctMatrix = MALLOC_MATRIX(float);
     float *gpuC;
@@ -275,27 +397,6 @@ int main(const int argc, const char **argv) {
 
     const auto *csrA = new CSRMatrix(*matrixA);
     const auto *bcsrA = new BCSRMatrix(*matrixA);
-    bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData);
-
-    cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half));
-    cudaMalloc(reinterpret_cast<void **>(&gpuB_half), BYTES_SIZE(half));
-    cudaMalloc(reinterpret_cast<void **>(&gpuC), BYTES_SIZE(float));
-    cudaMalloc(reinterpret_cast<void **>(&gpuCSRData),
-               csrA->hdr[N] * sizeof(half));
-    cudaMalloc(reinterpret_cast<void **>(&gpuCSRHdr), (N + 1) * sizeof(int));
-    cudaMalloc(reinterpret_cast<void **>(&gpuCSRIdx),
-               csrA->hdr[N] * sizeof(int));
-
-    cudaMemcpy(gpuA_half, matrixA->data, BYTES_SIZE(half),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuB_half, matrixB->data, BYTES_SIZE(half),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuCSRData, csrA->data, csrA->hdr[N] * sizeof(half),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuCSRHdr, csrA->hdr, (N + 1) * sizeof(int),
-               cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuCSRIdx, csrA->idx, csrA->hdr[N] * sizeof(int),
-               cudaMemcpyHostToDevice);
 
     /* ========================== DENSE ON CPU ========================== */
 #ifdef CHECK_CORRECTNESS
@@ -305,7 +406,7 @@ int main(const int argc, const char **argv) {
 #endif
 
     /* ========================== DENSE ON GPU ========================== */
-    gridSize = {
+    /*gridSize = {
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         1
@@ -315,9 +416,10 @@ int main(const int argc, const char **argv) {
     denseMatrixMul<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
     END_FUNC("Dense on GPU");
     // Use dense on GPU as correct function
-    memcpy(correctMatrix, memC, N * N * sizeof(float));
+    memcpy(correctMatrix, memC, N * N * sizeof(float));*/
 
     /* ================= DENSE ON GPU WITH COALESCENCE ================== */
+    ALLOC_GPU_MEM
     gridSize = {
         CEIL_DIV(N, (N_THREADS * N_THREADS)),
         CEIL_DIV(N, CEIL_DIV(N_THREADS * N_THREADS, N)),
@@ -327,8 +429,10 @@ int main(const int argc, const char **argv) {
     PREPARE_FUNC("Dense on GPU Coalescence");
     denseMatrixMulCo<<<gridSize, blockSize>>>(gpuA_half, gpuB_half, gpuC, N);
     END_FUNC("Dense on GPU Coalescence");
+    memcpy(correctMatrix, memC, N * N * sizeof(float));
 
     /* ========================== DENSE WMMA ========================== */
+    ALLOC_GPU_MEM
     gridSize = {N / 16, N / 16, 1};
     blockSize = {32, 1, 1};
     PREPARE_FUNC("Dense WMMA");
@@ -337,6 +441,7 @@ int main(const int argc, const char **argv) {
     END_FUNC("Dense WMMA");
 
     /* ========================== SpMM 1 Co ======================== */
+    ALLOC_GPU_MEM
     gridSize = {
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
@@ -345,10 +450,13 @@ int main(const int argc, const char **argv) {
     blockSize = {N_THREADS, N_THREADS, 1};
     PREPARE_FUNC("SpMM 1 Co");
     sparseMatrixMult1Co<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
-                                               gpuCSRData, gpuB_half, gpuC, N);
+                                                 gpuCSRData, gpuB_half, gpuC,
+                                                 N);
     END_FUNC("SpMM 1 Co");
 
     /* ========================== SpMM 1 ========================== */
+    /*
+    ALLOC_GPU_MEM
     gridSize = {
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
         N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
@@ -359,8 +467,11 @@ int main(const int argc, const char **argv) {
     sparseMatrixMult1<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM 1");
+    */
 
     /* ========================== SpMM 2 ========================== */
+    /*
+    ALLOC_GPU_MEM
     gridSize = {
         N / (N_THREADS * N_THREADS) + (N % (N_THREADS * N_THREADS) > 0 ? 1 : 0),
         1, 1
@@ -370,8 +481,11 @@ int main(const int argc, const char **argv) {
     sparseMatrixMult2<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM 2");
+    */
 
     /* ========================== SpMM 3 ========================== */
+    /*
+    ALLOC_GPU_MEM
     gridSize = {
         csrA->hdr[N] / (N_THREADS * N_THREADS) + (
             csrA->hdr[N] % (N_THREADS * N_THREADS) > 0 ? 1 : 0),
@@ -383,46 +497,61 @@ int main(const int argc, const char **argv) {
     sparseMatrixMult3<<<gridSize, blockSize>>>(gpuCSRHdr, gpuCSRIdx,
                                                gpuCSRData, gpuB_half, gpuC, N);
     END_FUNC("SpMM 3");
+    */
 
     /* ========================= SpMM WITH TENSORS ========================= */
+    ALLOC_GPU_MEM
     gridSize = {N / 16, N / 16, 1};
     blockSize = {32, 1, 1};
     PREPARE_FUNC("SpMM with Tensors");
     sparseMatrixMulTensor<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx,
-                                   gpuBCSRData, gpuB_half, gpuC, N);
+                                                   gpuBCSRData, gpuB_half, gpuC,
+                                                   N);
     END_FUNC("SpMM with Tensors");
 
+    /* ==================== SpMM WITH TENSORS OPTIMIZED ==================== */
+    /*ALLOC_GPU_MEM
+    gridSize = {N / 16, N / 16, 1};
+    blockSize = {32, 1, 1};
+    PREPARE_FUNC("SpMM with Tensors Op");
+    sparseMatrixMulTensor1<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx,
+                                                   gpuBCSRData, gpuB_half, gpuC,
+                                                   N);
+    END_FUNC("SpMM with Tensors Op");*/
+
     /* ============================== CUBLAS =============================== */
-    cublasHandle_t cublasHandle;
+
+    ALLOC_GPU_MEM
     cublasCreate(&cublasHandle);
-    constexpr float alpha = 1.0;
-    constexpr float beta = 0.0;
-    const int n = static_cast<int>(N);
 
     PREPARE_FUNC("cuBLAS GeMM");
     cublasGemmEx(cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &alpha,
-        gpuB_half, CUDA_R_16F, n,
-        gpuA_half, CUDA_R_16F, n,
-        &beta, gpuC, CUDA_R_32F, n, CUBLAS_COMPUTE_32F,
-    CUBLAS_GEMM_DEFAULT);
+                 gpuB_half, CUDA_R_16F, n,
+                 gpuA_half, CUDA_R_16F, n,
+                 &beta, gpuC, CUDA_R_32F, n, CUBLAS_COMPUTE_32F,
+                 CUBLAS_GEMM_DEFAULT);
     END_FUNC("cuBLAS GeMM");
 
     cublasDestroy(cublasHandle);
 
-    /* ============================== CUBLAS =============================== */
+    /* ============================== CUBLAS WITH TENSORS =============================== */
 
+    ALLOC_GPU_MEM
     cublasCreate(&cublasHandle);
 
     PREPARE_FUNC("cuBLAS GeMM with Tensors");
     cublasGemmEx(cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &alpha,
-        gpuB_half, CUDA_R_16F, n,
-        gpuA_half, CUDA_R_16F, n,
-        &beta, gpuC, CUDA_R_32F, n, CUBLAS_COMPUTE_32F_FAST_16F,
-        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+                 gpuB_half, CUDA_R_16F, n,
+                 gpuA_half, CUDA_R_16F, n,
+                 &beta, gpuC, CUDA_R_32F, n, CUBLAS_COMPUTE_32F_FAST_16F,
+                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     END_FUNC("cuBLAS GeMM with Tensors");
 
     cublasDestroy(cublasHandle);
+
     /* ============================= CUSPARSE ============================== */
+
+    ALLOC_GPU_MEM
     cusparseHandle_t cusparseHandle;
     size_t bufferSize;
     void *gpuBuffer = nullptr;
@@ -440,36 +569,38 @@ int main(const int argc, const char **argv) {
     cusparseSetMatIndexBase(cusparseMatDescr, CUSPARSE_INDEX_BASE_ZERO);
 
     cusparseCreateCsr(&matDescrA, n, n, csrA->hdr[N],
-        gpuCSRHdr, gpuCSRIdx, gpuCSRData,
-        CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_16F);
+                      gpuCSRHdr, gpuCSRIdx, gpuCSRData,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_16F);
     cusparseCreateDnMat(&matDescrB, n, n, n, gpuB_half,
-        CUDA_R_16F, CUSPARSE_ORDER_COL);
+                        CUDA_R_16F, CUSPARSE_ORDER_COL);
     cusparseCreateDnMat(&matDescrC, n, n, n, gpuC,
-        CUDA_R_32F, CUSPARSE_ORDER_ROW);
+                        CUDA_R_32F, CUSPARSE_ORDER_ROW);
 
     cusparseSpMM_bufferSize(cusparseHandle,
-        CUSPARSE_OPERATION_NON_TRANSPOSE,
-        CUSPARSE_OPERATION_TRANSPOSE,
-        &alpha, matDescrA, matDescrB,
-        &beta, matDescrC, CUDA_R_32F,
-        CUSPARSE_SPMM_ALG_DEFAULT, &bufferSize);
+                            CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            CUSPARSE_OPERATION_TRANSPOSE,
+                            &alpha, matDescrA, matDescrB,
+                            &beta, matDescrC, CUDA_R_32F,
+                            CUSPARSE_SPMM_ALG_DEFAULT, &bufferSize);
     cudaMalloc(&gpuBuffer, bufferSize);
 
     PREPARE_FUNC("cuSPARSE CSR");
     cusparseSpMM(cusparseHandle,
-        CUSPARSE_OPERATION_NON_TRANSPOSE,
-        CUSPARSE_OPERATION_TRANSPOSE,
-        &alpha, matDescrA, matDescrB, &beta,
-        matDescrC,CUDA_R_32F,
-        CUSPARSE_SPMM_ALG_DEFAULT, gpuBuffer);
+                 CUSPARSE_OPERATION_NON_TRANSPOSE,
+                 CUSPARSE_OPERATION_TRANSPOSE,
+                 &alpha, matDescrA, matDescrB, &beta,
+                 matDescrC, CUDA_R_32F,
+                 CUSPARSE_SPMM_ALG_DEFAULT, gpuBuffer);
     END_FUNC("cuSPARSE CSR",
-        cusparseDnMatGet(matDescrC, &rows, &cols, &ld, reinterpret_cast<void **>(&gpuC), &dataType, &order););
+             cusparseDnMatGet(matDescrC, &rows, &cols, &ld, reinterpret_cast<
+                 void **>(&gpuC), &dataType, &order););
 
     cusparseDestroySpMat(matDescrA);
     cusparseDestroyDnMat(matDescrB);
     cusparseDestroyDnMat(matDescrC);
     cusparseDestroy(cusparseHandle);
+    cudaDeviceReset();
 
     free(memC);
     free(correctMatrix);
