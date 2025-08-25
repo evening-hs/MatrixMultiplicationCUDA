@@ -28,6 +28,8 @@ add_executable(matrix_multiplication main.cu
         BCSRMatrix.cuh
         miscutil.cpp
         miscutil.h
+        HCSRMatrix.cpp
+        HCSRMatrix.h
 )
 
 # Set CUDA specific properties

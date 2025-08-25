@@ -9,13 +9,15 @@
 
 #include "BCSRMatrix.cuh"
 #include "CSRMatrix.cuh"
+#include "HCSRMatrix.h"
 #include "Matrix.cuh"
 #include "miscutil.h"
 
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
-string MATRIX_A_PATH = "../tests/MatrixA_1024_blockrandom_0.7_0.mat";
-string MATRIX_B_PATH = "../tests/MatrixB_1024_0.mat";
+extern const int BLOCK_SIZE = 16;
+string MATRIX_A_PATH = "../small.mat";
+string MATRIX_B_PATH = "../small.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -36,28 +38,20 @@ using std::chrono::milliseconds;
 #define ALLOC_GPU_MEM \
     cudaDeviceReset(); \
     bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData); \
+    csrA->copyToDevice(&gpuCSRHdr, &gpuCSRIdx, &gpuCSRData); \
     cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half)); \
     cudaMalloc(reinterpret_cast<void **>(&gpuB_half), BYTES_SIZE(half)); \
     cudaMalloc(reinterpret_cast<void **>(&gpuC), BYTES_SIZE(float)); \
-    cudaMalloc(reinterpret_cast<void **>(&gpuCSRData), \
-    csrA->hdr[N] * sizeof(half)); \
-    cudaMalloc(reinterpret_cast<void **>(&gpuCSRHdr), (N + 1) * sizeof(int)); \
-    cudaMalloc(reinterpret_cast<void **>(&gpuCSRIdx), \
-               csrA->hdr[N] * sizeof(int)); \
+    cudaMalloc(reinterpret_cast<void **>(&gpuCPart), BYTES_SIZE(float)); \
     cudaMemcpy(gpuA_half, matrixA->data, BYTES_SIZE(half), \
                cudaMemcpyHostToDevice); \
     cudaMemcpy(gpuB_half, matrixB->data, BYTES_SIZE(half), \
-               cudaMemcpyHostToDevice); \
-    cudaMemcpy(gpuCSRData, csrA->data, csrA->hdr[N] * sizeof(half), \
-               cudaMemcpyHostToDevice); \
-    cudaMemcpy(gpuCSRHdr, csrA->hdr, (N + 1) * sizeof(int), \
-    cudaMemcpyHostToDevice); \
-    cudaMemcpy(gpuCSRIdx, csrA->idx, csrA->hdr[N] * sizeof(int), \
                cudaMemcpyHostToDevice);
 #define PREPARE_FUNC(_name) \
     cout << "Running " << _name << "\n"; \
     memset(memC, 0, BYTES_SIZE(float)); \
     cudaMemset(gpuC, 0, BYTES_SIZE(float)); \
+    cudaMemset(gpuCPart, 0, BYTES_SIZE(float)); \
     cudaEventCreate(&t1); \
     cudaEventCreate(&t2); \
     cudaEventRecord(t1, 0);
@@ -122,8 +116,8 @@ __global__ void denseMatrixMul(const half *d_A, const half *d_B, float *d_C,
  */
 __global__ void denseMatrixMulCo(const half *d_A, const half *d_B, float *d_C,
                                  const unsigned int n) {
-    const unsigned int rowIdx = blockIdx.y * CEIL_DIV(n, gridDim.y) + threadIdx.
-                                x / n;
+    const unsigned int rowIdx = blockIdx.y *
+        CEIL_DIV(n, gridDim.y) + threadIdx.x / n;
     const unsigned int colIdx = blockIdx.x * blockDim.x + threadIdx.x % n;
 
     if (rowIdx < n && colIdx < n) {
@@ -252,14 +246,10 @@ __global__ void sparseMatrixMult3(const int *hdr, const int *idx,
 __global__ void sparseMatrixMulTensor1(const int *hdr, const int *idx,
                                       const half *data, const half *B,
                                       float *C, const unsigned int n) {
-        const unsigned int warpRow = blockIdx.y * 16;
+    const unsigned int warpRow = blockIdx.y * 16;
     const unsigned int warpCol = blockIdx.x * 16;
 
     if (warpRow >= n || warpCol >= n) return;
-
-    // Double buffering for B matrix tiles
-    __shared__ half B_shared[2][16 * 16];
-    __shared__ int idx_cache[32];
 
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
@@ -267,73 +257,13 @@ __global__ void sparseMatrixMulTensor1(const int *hdr, const int *idx,
 
     wmma::fill_fragment(c_frag, 0.0f);
 
-    const unsigned int row_start = hdr[warpRow / 16];
-    const unsigned int row_end = hdr[warpRow / 16 + 1];
-    const unsigned nnz_in_row = row_end - row_start;
+    wmma::fill_fragment(c_frag, 0.0f);
 
-    const unsigned int tid = threadIdx.x + threadIdx.y * blockDim.x;
-    const unsigned int total_threads = blockDim.x * blockDim.y;
-
-    // Load indices
-    for (unsigned int i = tid; i < nnz_in_row; i += total_threads) {
-        if (row_start + i < row_end) {
-            idx_cache[i] = idx[row_start + i];
-        }
-    }
-    __syncthreads();
-
-    int buffer_idx = 0;
-    int last_loaded_col = -1;
-
-    // Prefetch first B tile if we have any work
-    if (nnz_in_row > 0) {
-        const int first_col = idx_cache[0];
-        if (first_col != last_loaded_col) {
-            const half *B_tile = B + first_col * 16 * n + warpCol;
-            for (unsigned int i = tid; i < 256; i += total_threads) {
-                const unsigned int local_row = i / 16;
-                const unsigned int local_col = i % 16;
-                if (first_col * 16 + local_row < n && warpCol + local_col < n) {
-                    B_shared[buffer_idx][local_row * 16 + local_col] = B_tile[local_row * n + local_col];
-                } else {
-                    B_shared[buffer_idx][local_row * 16 + local_col] = __float2half(0.0f);
-                }
-            }
-            last_loaded_col = first_col;
-        }
-        __syncthreads();
-    }
-
-    for (int k = 0; k < nnz_in_row; k++) {
-        wmma::load_matrix_sync(a_frag, data + (row_start + k) * 16 * 16, 16);
-
-        if (k + 1 < nnz_in_row) {
-            const int next_col = idx_cache[k + 1];
-            const int next_buffer_idx = 1 - buffer_idx;
-
-            if (next_col != last_loaded_col) {
-                const half *B_tile = B + next_col * 16 * n + warpCol;
-                for (int unsigned i = tid; i < 256; i += total_threads) {
-                    const unsigned int local_row = i / 16;
-                    const unsigned int local_col = i % 16;
-                    if (next_col * 16 + local_row < n && warpCol + local_col < n) {
-                        B_shared[next_buffer_idx][local_row * 16 + local_col] = B_tile[local_row * n + local_col];
-                    } else {
-                        B_shared[next_buffer_idx][local_row * 16 + local_col] = __float2half(0.0f);
-                    }
-                }
-            }
-        }
-
-        wmma::load_matrix_sync(b_frag, B_shared[buffer_idx], 16);
+#pragma unroll
+    for (int k = hdr[warpRow / 16]; k < hdr[warpRow / 16 + 1]; k++) {
+        wmma::load_matrix_sync(a_frag, data + k * 16 * 16, 16);
+        wmma::load_matrix_sync(b_frag, B + idx[k] * 16 * n + warpCol, n);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-
-        __syncthreads();
-
-        if (k + 1 < nnz_in_row && idx_cache[k + 1] != last_loaded_col) {
-            buffer_idx = 1 - buffer_idx;
-            last_loaded_col = idx_cache[k + 1];
-        }
     }
 
     wmma::store_matrix_sync(C + warpRow * n + warpCol, c_frag, n,
@@ -367,6 +297,16 @@ __global__ void sparseMatrixMulTensor(const int *hdr, const int *idx,
                             wmma::mem_row_major);
 }
 
+__global__ void addMatrices(float *C, const float *CPart, const unsigned int n) {
+    const unsigned int rowIdx = blockIdx.y *
+        CEIL_DIV(n, gridDim.y) + threadIdx.x / n;
+    const unsigned int colIdx = blockIdx.x * blockDim.x + threadIdx.x % n;
+
+    if (rowIdx < n && colIdx < n) {
+        C[rowIdx * n + colIdx] += CPart[rowIdx * n + colIdx];
+    }
+}
+
 int main(const int argc, const char **argv) {
     if (argc == 3) {
         MATRIX_A_PATH = argv[1];
@@ -377,6 +317,7 @@ int main(const int argc, const char **argv) {
     const Matrix *matrixA = new Matrix(MATRIX_A_PATH);
     cout << "Reading matrix B...\n";
     const Matrix *matrixB = new Matrix(MATRIX_B_PATH);
+    assert(matrixA->rows && matrixA->cols && matrixB->rows && matrixB->cols);
     assert(matrixA->cols == matrixB->rows);
     N = matrixA->cols;
 
@@ -387,9 +328,11 @@ int main(const int argc, const char **argv) {
 
     auto *memC = MALLOC_MATRIX(float);
     auto *correctMatrix = MALLOC_MATRIX(float);
-    float *gpuC;
+    float *gpuC, *gpuCPart;
     half *gpuA_half, *gpuB_half, *gpuCSRData, *gpuBCSRData;
+    half *gpuCSRDataPart, *gpuBCSRDataPart;
     int *gpuCSRHdr, *gpuCSRIdx, *gpuBCSRHdr, *gpuBCSRIdx;
+    int *gpuCSRHdrPart, *gpuCSRIdxPart, *gpuBCSRHdrPart, *gpuBCSRIdxPart;
     cudaEvent_t t1, t2;
     float ms = 0.0f;
     dim3 gridSize, blockSize;
@@ -510,14 +453,14 @@ int main(const int argc, const char **argv) {
     END_FUNC("SpMM with Tensors");
 
     /* ==================== SpMM WITH TENSORS OPTIMIZED ==================== */
-    /*ALLOC_GPU_MEM
+    ALLOC_GPU_MEM
     gridSize = {N / 16, N / 16, 1};
     blockSize = {32, 1, 1};
     PREPARE_FUNC("SpMM with Tensors Op");
     sparseMatrixMulTensor1<<<gridSize, blockSize>>>(gpuBCSRHdr, gpuBCSRIdx,
                                                    gpuBCSRData, gpuB_half, gpuC,
                                                    N);
-    END_FUNC("SpMM with Tensors Op");*/
+    END_FUNC("SpMM with Tensors Op");
 
     /* ============================== CUBLAS =============================== */
 
@@ -595,6 +538,39 @@ int main(const int argc, const char **argv) {
     END_FUNC("cuSPARSE CSR",
              cusparseDnMatGet(matDescrC, &rows, &cols, &ld, reinterpret_cast<
                  void **>(&gpuC), &dataType, &order););
+
+    float sparsityThresholds[] = {0.0, 0.2, 0.4, 0.6, 0.8};
+    for (float threshold : sparsityThresholds) {
+        const auto *hcsrA = new HCSRMatrix(*matrixA, 0.5);
+
+        // Copy partial things
+        //hcsrA->bcsr->copyToDevice(&gpuBCSRHdrPart, &gpuBCSRIdxPart, &gpuBCSRDataPart);
+        //hcsrA->csr->copyToDevice(&gpuCSRHdrPart, &gpuCSRIdxPart, &gpuCSRDataPart);
+
+        string functionName = "Hybrid CSR " + to_string(threshold);
+        PREPARE_FUNC(functionName.c_str());
+        gridSize = {
+            N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+            N / N_THREADS + (N % N_THREADS > 0 ? 1 : 0),
+            1
+        };
+        blockSize = {N_THREADS, N_THREADS, 1};
+        sparseMatrixMult1Co<<<gridSize, blockSize>>>(gpuCSRHdrPart,
+            gpuCSRIdxPart, gpuCSRDataPart, gpuB_half, gpuCPart, N);
+        gridSize = {N / 16, N / 16, 1};
+        blockSize = {32, 1, 1};
+        sparseMatrixMulTensor1<<<gridSize, blockSize>>>(gpuBCSRHdrPart,
+            gpuBCSRIdxPart, gpuBCSRDataPart, gpuB_half, gpuC, N);
+        gridSize = {
+            CEIL_DIV(N, (N_THREADS * N_THREADS)),
+            CEIL_DIV(N, CEIL_DIV(N_THREADS * N_THREADS, N)),
+            1
+        };
+        blockSize = {N_THREADS * N_THREADS, 1, 1};
+        addMatrices<<<gridSize, blockSize>>>(gpuC, gpuCPart, N);
+
+        END_FUNC(functionName.c_str());
+    }
 
     cusparseDestroySpMat(matDescrA);
     cusparseDestroyDnMat(matDescrB);

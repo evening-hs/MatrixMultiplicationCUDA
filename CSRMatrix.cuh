@@ -12,11 +12,13 @@
 
 class CSRMatrix {
 public:
+    int N;
     int *hdr = nullptr;
     int *idx = nullptr;
     half *data = nullptr;
     explicit CSRMatrix(const Matrix &matrix);
     ~CSRMatrix();
+    void copyToDevice(int **gpuHdr, int **gpuIdx, half **gpuData) const;
 };
 
 

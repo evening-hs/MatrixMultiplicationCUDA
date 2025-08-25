@@ -8,10 +8,10 @@ import re
 from matrix_generator import generate_matrix
 
 
-MATRIX_SIZES = [0x400, 0x1000, 0x2000]
+MATRIX_SIZES = [0x500, 0x1000, 0x1500, 0x2000]
 TEST_PATTERNS = ["blockrandom"]
-SPARSITY = [0.25, 0.5, 0.70, 0.85]
-NUM_RUNS = 10
+SPARSITY = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+NUM_RUNS = 30
 GENERATE_TEST_FILES = True
 RUN_TESTS = True
 

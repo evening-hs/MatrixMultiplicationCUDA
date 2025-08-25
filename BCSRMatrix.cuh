@@ -6,7 +6,6 @@
 #define BCSRMATRIX_CUH
 #include "Matrix.cuh"
 
-
 class BCSRMatrix {
 public:
     int *hdr = nullptr;

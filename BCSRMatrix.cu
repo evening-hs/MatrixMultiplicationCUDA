@@ -7,6 +7,10 @@
 #include <cassert>
 #include <iostream>
 
+#include "miscutil.h"
+
+extern const int BLOCK_SIZE;
+
 #define ASSERT_CUDA_SUCCESS error = cudaGetLastError(); \
                             if (error != cudaSuccess) \
                             cout << "BCSRMatrix::copyToDevice CUDA " \
@@ -16,36 +20,37 @@
 
 BCSRMatrix::BCSRMatrix(const Matrix &matrix) {
     // find dense 16x16 blocks
-    blockRows = matrix.rows / 16;
+    blockRows = matrix.rows / BLOCK_SIZE;
     hdr = static_cast<int *>(malloc((blockRows + 1) * sizeof(int)));
     hdr[0] = 0;
 
-    for (int i = 0; i < matrix.rows; i += 16) {
-        hdr[i / 16 + 1] = hdr[i / 16];
-        for (int j = 0; j < matrix.cols; j += 16) {
-            if (matrix.data[i * matrix.cols + j])
-            {
-                hdr[i / 16 + 1]++;
+    for (int i = 0; i < matrix.rows; i += BLOCK_SIZE) {
+        hdr[i / BLOCK_SIZE + 1] = hdr[i / BLOCK_SIZE];
+        for (int j = 0; j < matrix.cols; j += BLOCK_SIZE) {
+            if (blockDensity(matrix, i, j) > 0.0f) {
+                hdr[i / BLOCK_SIZE + 1]++;
             }
         }
     }
 
     idx = static_cast<int *>(malloc(hdr[blockRows] * sizeof(int)));
-    data = static_cast<half *>(malloc(hdr[blockRows] * sizeof(half) * 16 * 16));
+    data = static_cast<half *>(malloc(
+        hdr[blockRows] * sizeof(half) * BLOCK_SIZE * BLOCK_SIZE));
 
     int k = 0;
-    for (int i = 0; i < matrix.rows; i += 16) {
-        for (int j = 0; j < matrix.cols; j += 16) {
-            if (matrix.data[i * matrix.cols + j]) {
-                idx[k] = j / 16;
+    for (int i = 0; i < matrix.rows; i += BLOCK_SIZE) {
+        for (int j = 0; j < matrix.cols; j += BLOCK_SIZE) {
+            if (blockDensity(matrix, i, j) > 0.0f) {
+                idx[k] = j / BLOCK_SIZE;
                 // obtain fragment
-                for (int x = 0; x < 16; x++) {
-                    for (int y = 0; y < 16; y++) {
-                        data[k * 16 * 16 + x * 16 + y] = matrix.data[(i + x) * matrix.cols + j + y];
+                for (int x = 0; x < BLOCK_SIZE; x++) {
+                    for (int y = 0; y < BLOCK_SIZE; y++) {
+                        data[k * BLOCK_SIZE * BLOCK_SIZE + x * BLOCK_SIZE + y] =
+                                matrix.data[(i + x) * matrix.cols + j + y];
                     }
                 }
-                nonZeros += 16 * 16;
-                k ++;
+                nonZeros += BLOCK_SIZE * BLOCK_SIZE;
+                k++;
             }
         }
     }
@@ -71,10 +76,11 @@ void BCSRMatrix::print() const {
     std::cout << "\ndata:\n\t";
     for (int i = 0; i < hdr[blockRows]; i++) {
         std::cout << "=== Block " << i << " ===\n";
-        for (int j = 0; j < 16; j++) {
+        for (int j = 0; j < BLOCK_SIZE; j++) {
             cout << '\t';
-            for (int k = 0; k < 16; k++) {
-                cout << __half2float(data[i * 16 * 16 + j * 16 + k]) << " ";
+            for (int k = 0; k < BLOCK_SIZE; k++) {
+                cout << __half2float(
+                    data[i * BLOCK_SIZE * BLOCK_SIZE + j * BLOCK_SIZE + k]) <<" ";
             }
             cout << '\n';
         }
@@ -94,7 +100,7 @@ const {
     ASSERT_CUDA_SUCCESS;
 
     cudaMalloc(reinterpret_cast<void **>(gpuData),
-               hdr[blockRows] * sizeof(half) * 16 * 16);
+               hdr[blockRows] * sizeof(half) * BLOCK_SIZE * BLOCK_SIZE);
     ASSERT_CUDA_SUCCESS;
 
     cudaMemcpy(*gpuHdr, hdr, (blockRows + 1) * sizeof(int),
@@ -103,7 +109,8 @@ const {
     cudaMemcpy(*gpuIdx, idx, hdr[blockRows] * sizeof(int),
                cudaMemcpyHostToDevice);
     ASSERT_CUDA_SUCCESS;
-    cudaMemcpy(*gpuData, data, hdr[blockRows] * sizeof(half) * 16 * 16,
-                cudaMemcpyHostToDevice);
+    cudaMemcpy(*gpuData, data,
+               hdr[blockRows] * sizeof(half) * BLOCK_SIZE * BLOCK_SIZE,
+               cudaMemcpyHostToDevice);
     ASSERT_CUDA_SUCCESS;
 }

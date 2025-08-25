@@ -8,6 +8,7 @@ Matrix::Matrix(const int rows, const int cols) {
     this->cols = cols;
     this->nonZeros = 0;
     this->data = static_cast<half *>(malloc((rows * cols) * sizeof(half)));
+    fill_n(this->data, rows * cols, 0);
 }
 
 Matrix::Matrix(const string &filename) {

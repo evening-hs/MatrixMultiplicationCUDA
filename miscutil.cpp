@@ -7,6 +7,8 @@
 #include <cmath>
 #include <iostream>
 
+extern const int BLOCK_SIZE;
+
 using namespace std;
 
 void printMatrix(const float *M, const unsigned int n) {
@@ -51,11 +53,24 @@ float maxdiff(const float *A, const float *B, const unsigned int n) {
 }
 
 float avgrelerr(const float *A, const float *B, const unsigned int n) {
-    double sum = 0.0f;
+    float sum = 0.0f;
 
     for (int i = 0; i < n * n; i++) {
         sum += fabs(A[i] - B[i]) / B[i];
     }
 
-    return sum / n;
+    return sum / static_cast<float>(n);
+}
+
+float blockDensity(const Matrix &matrix, int i, int j) {
+    int nonZeros = 0;
+    for (int i1 = i; i1 < i + BLOCK_SIZE; i1++) {
+        for (int j1 = j; j1 < j + BLOCK_SIZE; j1++) {
+            if (matrix.data[i1 * matrix.cols + j1])
+                nonZeros++;
+        }
+    }
+
+    return static_cast<float>(nonZeros) / static_cast<float>(
+               BLOCK_SIZE * BLOCK_SIZE);
 }
