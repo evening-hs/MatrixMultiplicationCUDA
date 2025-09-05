@@ -1,5 +1,15 @@
 #include "CSRMatrix.cuh"
 
+#include <cassert>
+#include <iostream>
+
+#define CHECK_CUDA_ERRORS(_where) \
+    error = cudaGetLastError(); \
+    if (error != cudaSuccess) \
+        std::cout << _where << " CUDA " \
+        "error: " << cudaGetErrorString(error) << '\n'; \
+    assert(error == cudaSuccess);
+
 CSRMatrix::CSRMatrix(const Matrix &matrix) {
     N = matrix.rows;
     hdr = static_cast<int *>(malloc((matrix.rows + 1) * sizeof(int)));
@@ -33,13 +43,21 @@ CSRMatrix::~CSRMatrix() {
 }
 
 void CSRMatrix::copyToDevice(int **gpuHdr, int **gpuIdx, half **gpuData) const {
+    cudaError error;
+
     cudaMalloc(reinterpret_cast<void **>(gpuData), hdr[N] * sizeof(half));
+    CHECK_CUDA_ERRORS("CSRMatrix::copyToDevice malloc gpuData");
     cudaMalloc(reinterpret_cast<void **>(gpuHdr), (N + 1) * sizeof(int));
+    CHECK_CUDA_ERRORS("CSRMatrix::copyToDevice malloc gpuHdr");
     cudaMalloc(reinterpret_cast<void **>(gpuIdx), hdr[N] * sizeof(int));
-    cudaMemcpy(gpuData, data, hdr[N] * sizeof(half),
+    CHECK_CUDA_ERRORS("CSRMatrix::copyToDevice malloc gpuIdx");
+    cudaMemcpy(*gpuData, data, hdr[N] * sizeof(half),
                cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuHdr, hdr, (N + 1) * sizeof(int),
+    CHECK_CUDA_ERRORS("CSRMatrix::copyToDevice gpuData");
+    cudaMemcpy(*gpuHdr, hdr, (N + 1) * sizeof(int),
                cudaMemcpyHostToDevice);
-    cudaMemcpy(gpuIdx, idx, hdr[N] * sizeof(int),
+    CHECK_CUDA_ERRORS("CSRMatrix::copyToDevice gpuHdr");
+    cudaMemcpy(*gpuIdx, idx, hdr[N] * sizeof(int),
                cudaMemcpyHostToDevice);
+    CHECK_CUDA_ERRORS("CSRMatrix::copyToDevice gpuIdx");
 }

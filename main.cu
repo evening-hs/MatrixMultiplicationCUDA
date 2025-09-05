@@ -16,8 +16,8 @@
 unsigned int N = 0;
 constexpr unsigned int N_THREADS = 32;
 extern const int BLOCK_SIZE = 16;
-string MATRIX_A_PATH = "../small.mat";
-string MATRIX_B_PATH = "../small.mat";
+string MATRIX_A_PATH = "../medA.mat";
+string MATRIX_B_PATH = "../medB.mat";
 
 using namespace std;
 using namespace nvcuda;
@@ -29,14 +29,17 @@ using std::chrono::milliseconds;
 
 #define BLOCKSIZE 32
 #define CEIL_DIV(_a, _b) ((_a) / (_b) + ((_a) % (_b) > 0 ? 1 : 0))
-#define CHECK_CUDA_ERRORS \
+#define CHECK_CUDA_ERRORS(_where) \
     error = cudaGetLastError(); \
     if (error != cudaSuccess) \
-        cout << "CUDA error: " << cudaGetErrorString(error) << '\n';
+        cout << _where << " CUDA " \
+        "error: " << cudaGetErrorString(error) << '\n'; \
+    assert(error == cudaSuccess);
 #define BYTES_SIZE(T) (N * N * sizeof(T))
 #define MALLOC_MATRIX(T) static_cast<T *>(malloc(BYTES_SIZE(T)));
 #define ALLOC_GPU_MEM \
     cudaDeviceReset(); \
+    CHECK_CUDA_ERRORS("cudaDeviceReset") \
     bcsrA->copyToDevice(&gpuBCSRHdr, &gpuBCSRIdx, &gpuBCSRData); \
     csrA->copyToDevice(&gpuCSRHdr, &gpuCSRIdx, &gpuCSRData); \
     cudaMalloc(reinterpret_cast<void **>(&gpuA_half), BYTES_SIZE(half)); \
@@ -46,7 +49,8 @@ using std::chrono::milliseconds;
     cudaMemcpy(gpuA_half, matrixA->data, BYTES_SIZE(half), \
                cudaMemcpyHostToDevice); \
     cudaMemcpy(gpuB_half, matrixB->data, BYTES_SIZE(half), \
-               cudaMemcpyHostToDevice);
+               cudaMemcpyHostToDevice); \
+    CHECK_CUDA_ERRORS("cudaMemcpy")
 #define PREPARE_FUNC(_name) \
     cout << "Running " << _name << "\n"; \
     memset(memC, 0, BYTES_SIZE(float)); \
@@ -57,7 +61,6 @@ using std::chrono::milliseconds;
     cudaEventRecord(t1, 0);
 #define END_FUNC(_name, ...) \
     cudaDeviceSynchronize(); \
-    CHECK_CUDA_ERRORS \
     cudaEventRecord(t2, 0); \
     cudaEventSynchronize(t2); \
     cudaEventElapsedTime(&ms, t1, t2); \
@@ -539,13 +542,15 @@ int main(const int argc, const char **argv) {
              cusparseDnMatGet(matDescrC, &rows, &cols, &ld, reinterpret_cast<
                  void **>(&gpuC), &dataType, &order););
 
+    /* ============================ HYBRID CSR ============================= */
+
     float sparsityThresholds[] = {0.0, 0.2, 0.4, 0.6, 0.8};
     for (float threshold : sparsityThresholds) {
-        const auto *hcsrA = new HCSRMatrix(*matrixA, 0.5);
-
+        ALLOC_GPU_MEM
         // Copy partial things
-        //hcsrA->bcsr->copyToDevice(&gpuBCSRHdrPart, &gpuBCSRIdxPart, &gpuBCSRDataPart);
-        //hcsrA->csr->copyToDevice(&gpuCSRHdrPart, &gpuCSRIdxPart, &gpuCSRDataPart);
+        const auto *hcsrA = new HCSRMatrix(*matrixA, threshold);
+        hcsrA->bcsr->copyToDevice(&gpuBCSRHdrPart, &gpuBCSRIdxPart, &gpuBCSRDataPart);
+        hcsrA->csr->copyToDevice(&gpuCSRHdrPart, &gpuCSRIdxPart, &gpuCSRDataPart);
 
         string functionName = "Hybrid CSR " + to_string(threshold);
         PREPARE_FUNC(functionName.c_str());

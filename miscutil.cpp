@@ -53,13 +53,13 @@ float maxdiff(const float *A, const float *B, const unsigned int n) {
 }
 
 float avgrelerr(const float *A, const float *B, const unsigned int n) {
-    float sum = 0.0f;
+    double sum = 0.0f;
 
     for (int i = 0; i < n * n; i++) {
         sum += fabs(A[i] - B[i]) / B[i];
     }
 
-    return sum / static_cast<float>(n);
+    return sum / n;
 }
 
 float blockDensity(const Matrix &matrix, int i, int j) {

@@ -16,15 +16,15 @@ HCSRMatrix::HCSRMatrix(const Matrix &matrix, float threshold) {
         for (int j = 0; j < matrix.cols; j += BLOCK_SIZE) {
             if (blockDensity(matrix, i, j) >= threshold) {
                 // Copy this block to the matrix1
-                for (int i1 = i; i1 < i + BLOCK_SIZE; i1 += BLOCK_SIZE) {
-                    for (int j1 = j; j1 < j + BLOCK_SIZE; j1 += BLOCK_SIZE) {
+                for (int i1 = i; i1 < i + BLOCK_SIZE; i1 ++) {
+                    for (int j1 = j; j1 < j + BLOCK_SIZE; j1 ++) {
                         matrix1->data[i1 * matrix1->cols + j1] = matrix.data[i1 * matrix.cols + j1];
                     }
                 }
             } else {
                 // Copy to matrix2
-                for (int i1 = i; i1 < i + BLOCK_SIZE; i1 += BLOCK_SIZE) {
-                    for (int j1 = j; j1 < j + BLOCK_SIZE; j1 += BLOCK_SIZE) {
+                for (int i1 = i; i1 < i + BLOCK_SIZE; i1 ++) {
+                    for (int j1 = j; j1 < j + BLOCK_SIZE; j1 ++) {
                         matrix2->data[i1 * matrix2->cols + j1] = matrix.data[i1 * matrix.cols + j1];
                     }
                 }

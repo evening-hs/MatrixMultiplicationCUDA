@@ -57,3 +57,4 @@ cmake-build-*/
 # Output files
 *.out*
 tests/
+__pycache__/
